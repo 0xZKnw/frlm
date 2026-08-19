@@ -31,9 +31,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-import data as D
-from model import PRESETS, ModelConfig, build_model
-from optim import build_optimizers, lr_multiplier
+from frlm import data as D
+from frlm.model import PRESETS, ModelConfig, build_model
+from frlm.optim import build_optimizers, lr_multiplier
 
 ROOT = Path(__file__).resolve().parent
 
@@ -671,9 +671,9 @@ def cmd_chat(args):
 
     console = Console()
     run_dir = Path(args.out_dir) / args.run
-    # On préfère la phase SFT (le modèle qui sait dialoguer) et on retombe sur le
-    # pré-entraînement si le SFT n'a pas encore tourné.
-    stages = [args.stage] if args.stage else ["sft", "mid", "pretrain"]
+    # On préfère la phase RL (la plus affûtée), puis SFT, et on retombe sur le
+    # pré-entraînement si rien d'autre n'a tourné.
+    stages = [args.stage] if args.stage else ["rl", "sft", "mid", "pretrain"]
     path = None
     for st in stages:
         d = run_dir / st
@@ -937,12 +937,29 @@ def main():
     p = sub.add_parser("sft", help="fine-tuning dialogue (masque de loss sur les réponses)")
     add_train_args(p)
 
+    p = sub.add_parser("rl", help="GRPO : renforcement à récompenses vérifiables (part du SFT)")
+    p.add_argument("--run", default="fr-micro")
+    p.add_argument("--out-dir", default="runs")
+    p.add_argument("--max-steps", type=int, default=500)
+    p.add_argument("--prompts", type=int, default=8, help="problèmes (groupes GRPO) par step")
+    p.add_argument("--group", type=int, default=8, help="réponses échantillonnées par problème")
+    p.add_argument("--max-new", type=int, default=220)
+    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--top-p", type=float, default=1.0)
+    p.add_argument("--lr", type=float, default=1e-5)
+    p.add_argument("--kl-beta", type=float, default=0.03)
+    p.add_argument("--micro-bs", type=int, default=8)
+    p.add_argument("--eval-every", type=int, default=25)
+    p.add_argument("--ckpt-every-min", type=float, default=5.0)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--resume", nargs="?", const="latest", default=None)
+
     p = sub.add_parser("chat", help="discute avec un checkpoint")
     p.add_argument("--run", default="fr-micro")
     p.add_argument("--out-dir", default="runs")
     p.add_argument("--ckpt", default="latest", help="latest | best | chemin vers un .pt")
-    p.add_argument("--stage", default=None, choices=["pretrain", "mid", "sft"],
-                   help="force la phase à charger (défaut : sft, sinon mid, sinon pretrain)")
+    p.add_argument("--stage", default=None, choices=["pretrain", "mid", "sft", "rl"],
+                   help="force la phase à charger (défaut : rl, sinon sft, mid, pretrain)")
     p.add_argument("--temperature", type=float, default=0.8)
     p.add_argument("--top-k", type=int, default=50)
     p.add_argument("--top-p", type=float, default=0.95)
@@ -974,6 +991,10 @@ def main():
         if args.cmd in ("mid", "sft") and args.resume is None:
             args.resume = "latest"   # mid/SFT partent forcément de poids déjà entraînés
         Trainer(cfg, resume=args.resume).train()
+
+    elif args.cmd == "rl":
+        from frlm.rl import cmd_rl
+        cmd_rl(args)
 
     elif args.cmd == "chat":
         cmd_chat(args)

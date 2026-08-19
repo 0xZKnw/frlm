@@ -27,11 +27,11 @@ from pathlib import Path
 
 import torch
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parents[1]   # racine du dépôt
 sys.path.insert(0, str(ROOT))
-import data as D  # noqa: E402
-import synth  # noqa: E402
-from model import ModelConfig, build_model  # noqa: E402
+from frlm import data as D  # noqa: E402
+from frlm import synth  # noqa: E402
+from frlm.model import ModelConfig, build_model  # noqa: E402
 
 CONCURRENTS = [
     ("asi/gpt-fr-cased-small", "GPT-fr small · 124M (Inria)"),
@@ -303,7 +303,7 @@ def main():
             torch.cuda.empty_cache()
 
     # ------------------------------------------------------------------ rapport
-    rap = ROOT / "bench_vs_report.md"
+    rap = ROOT / "bench" / "reports" / "bench_vs_report.md"
     with rap.open("w", encoding="utf-8") as f:
         f.write("# fr-v2 contre les GPT-2 français publics\n\n")
         f.write(f"bpb sur {len(texte):,} chars tenus à l'écart · "

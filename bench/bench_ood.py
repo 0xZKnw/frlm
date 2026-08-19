@@ -15,9 +15,11 @@ from pathlib import Path
 
 import torch
 
-from bench_vs import CONCURRENTS, ModeleHF, NotreModele, dernier_nombre
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from bench.bench_vs import CONCURRENTS, ModeleHF, NotreModele, dernier_nombre
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parents[1]   # racine du dépôt
 
 # (niveau, question, réponse attendue) — réponses vérifiées à la main.
 PROBLEMES = [
@@ -130,7 +132,7 @@ def main():
             del m.model
             torch.cuda.empty_cache()
 
-    rap = ROOT / "bench_ood_report.md"
+    rap = ROOT / "bench" / "reports" / "bench_ood_report.md"
     with rap.open("w", encoding="utf-8") as f:
         f.write("# Benchmark hors-distribution (problèmes 100% inédits)\n\n")
         f.write("| modèle | reformulé | contexte | concept | total | faits |\n")

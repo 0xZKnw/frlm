@@ -41,7 +41,7 @@ Against the closest public French causal LMs — all **2.15× its size**
 compare losses across different tokenizers.
 ² 100 exact-answer arithmetic problems (a generation seed never used in training),
 greedy decoding, scores **audited by hand** (the baselines' "lucky" points from
-degenerate loops were removed). Full details: `bench_vs_report.md`.
+degenerate loops were removed). Full details: `bench/reports/bench_vs_report.md`.
 
 ### The honest benchmark
 
@@ -49,7 +49,7 @@ On 40 **out-of-distribution** problems (reworded phrasings, novel contexts, nove
 concepts — `bench_ood.py`), frlm drops to **8/40** while the baselines get 0-1/40.
 At 58M, skill is still largely indexed on phrasing: the model masters its procedures,
 not yet the abstraction behind them. Both benchmarks ship with the repo, because
-either one alone would tell a lie. Details: `bench_ood_report.md`.
+either one alone would tell a lie. Details: `bench/reports/bench_ood_report.md`.
 
 | | reworded | novel context | novel concept |
 |---|---|---|---|
@@ -90,17 +90,21 @@ CPU is plenty for inference at this size.
 ## The repo
 
 ```
-model.py      the Qwen3.5-style architecture: gated attention (GQA + zero-centered
-              QK-Norm + partial RoPE + output gate), Gated DeltaNet (optional 3:1
-              hybrid), SwiGLU, KV-cached generation
-data.py       French corpora download, custom BPE tokenizer (digit-split),
-              binarization, reasoning-trace conversion to the <think> format
-synth.py      French math/logic problem generator: 15 families, solutions computed
-              in Python (never wrong), textbook-style write-ups
-optim.py      Muon (Newton-Schulz orthogonalization, batched) + LR schedules
-run.py        CLI: prepare / train / mid / sft / chat / info + dashboard + checkpoints
-bench_vs.py   benchmark vs the public French GPT-2s (bpb, arithmetic, facts)
-bench_ood.py  out-of-distribution benchmark (40 novel hand-written problems)
+run.py               CLI: prepare / train / mid / sft / rl / chat / info
+frlm/
+  model.py           the Qwen3.5-style architecture: gated attention (GQA +
+                     zero-centered QK-Norm + partial RoPE + output gate), Gated
+                     DeltaNet (optional 3:1 hybrid), SwiGLU, KV-cached generation
+  data.py            French corpora download, custom BPE tokenizer (digit-split),
+                     binarization, reasoning-trace conversion to <think> format
+  synth.py           French math/logic problem generator: 17 families, multiple
+                     phrasings per concept, Python-computed solutions (never wrong)
+  optim.py           Muon (Newton-Schulz orthogonalization, batched) + LR schedules
+  rl.py              GRPO with verifiable rewards (see Roadmap)
+bench/
+  bench_vs.py        benchmark vs the public French GPT-2s (bpb, arithmetic, facts)
+  bench_ood.py       out-of-distribution benchmark (40 novel hand-written problems)
+  reports/           full benchmark reports with every model answer
 ```
 
 ---
@@ -164,8 +168,9 @@ tracking) within a single hour.
 
 2. **Correct math from pretraining on.** `synth.py` generates problems whose
    solutions are **computed by Python** — zero errors in the data, unlike the web.
-   15 families: column arithmetic, money, sharing, sequences, unit conversions,
-   syllogisms, transitivity, parity, state tracking, groupings…
+   17 families: column arithmetic, money, sharing, sequences, unit conversions,
+   syllogisms, transitivity, parity, state tracking, groupings, parenthesized
+   expressions, liquid volumes…
 
 3. **The midtrain.** A short annealing phase on concentrated data between pretraining
    and SFT — the modern-lab recipe, at RTX 4060 scale.
@@ -245,7 +250,7 @@ epochs < 4 (beyond that it memorizes).
   tanks, check "VRAM peak". Lower `--batch-size`, compensate with `--grad-accum`.
 - Close heavy browser tabs: a browser eats 1-2 GB of VRAM.
 - The benchmark GPT-2s need `pip install transformers` (only for
-  `bench_vs.py` / `bench_ood.py`).
+  `python bench/bench_vs.py` / `python bench/bench_ood.py`, run from the repo root).
 
 ---
 
@@ -261,10 +266,15 @@ A 58M model trained on 1.1B tokens is not ChatGPT:
 
 ## Roadmap
 
-- **v2.2**: phrasing diversity in `synth.py` (elliptical, imperative, inverted
-  forms…) to attack the 8/40, then a re-SFT (~1 h).
-- **RL (GRPO)**: verifiable rewards — `synth.py` knows the answers, a Python
-  verifier scores generations. Target: reliability outside the training format.
+- **v2.2 — in the repo**: `synth.py` now emits several phrasings per concept —
+  machine symbols (`10*50 =`), parenthesized expressions, elliptical forms
+  ("Le double de 16 ?"), liters/containers state-tracking, more objects. Feeds
+  the RL stage below; a ~1 h re-SFT on regenerated data is the next cheap win.
+- **RL (GRPO) — in the repo**: `python run.py rl` — group-relative policy
+  optimization with verifiable rewards (`synth.py` knows every answer, a Python
+  verifier scores each rollout), a brevity bonus against rambling scratchpads,
+  and a KL anchor to the frozen SFT to preserve language quality. Live dashboard
+  with %-correct and held-out OOD curves. Results published after the first full run.
 
 ## License
 

@@ -251,11 +251,11 @@ def download_source(src_name: str, char_budget: int, out_path: Path, seed: int =
 
     # sources synthétiques : générées localement, pas de téléchargement
     if src_name == "maths":
-        import synth
+        from frlm import synth
         print(f"  {src_name:8s} : génération locale ({char_budget/1e6:.0f}M chars)…")
         return synth.write_jsonl(out_path, char_budget, seed=seed, mode="pretrain")
     if src_name == "maths_sft":
-        import synth
+        from frlm import synth
         print(f"  {src_name:9s} : génération locale ({char_budget/1e6:.0f}M chars)…")
         return synth.write_jsonl(out_path, char_budget, seed=seed + 1, mode="sft")
 
@@ -564,7 +564,7 @@ def prepare_all(data_dir: Path, target_tokens: int, vocab_size: int, mix: dict[s
                 # fournée fraîche : autre graine que le pretrain, donc problèmes inédits
                 p = raw_dir / "maths_mid.jsonl"
                 if not (skip_download and p.exists()):
-                    import synth
+                    from frlm import synth
                     synth.write_jsonl(p, budget_src, seed=seed + 101, mode="pretrain")
             else:
                 p = raw_dir / f"{name}.jsonl"
