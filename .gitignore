@@ -1,0 +1,10 @@
+# donnees et checkpoints : trop lourds pour git — voir la release pour les poids,
+# et `python run.py prepare` pour regenerer les corpus
+data/
+data-v2/
+runs/
+__pycache__/
+*.pt
+*.bin
+*.mask
+.cache/

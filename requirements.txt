@@ -1,0 +1,14 @@
+# PyTorch avec CUDA (déjà installé chez toi : 2.6.0+cu124)
+# Si besoin :  pip install torch --index-url https://download.pytorch.org/whl/cu124
+torch>=2.5
+
+datasets>=2.19        # streaming des corpus depuis le Hub
+tokenizers>=0.19      # BPE Rust (entraînement du tokenizer)
+numpy>=1.26
+tqdm>=4.66
+rich>=13.0            # dashboard temps réel
+nvidia-ml-py>=12.0    # télémétrie GPU (température, watts, horloge) — optionnel
+
+# torch.compile sous Windows : +94% de débit d'entraînement mesuré sur la 4060.
+# La borne <3.3 est importante : triton 3.3+ est incompatible avec torch 2.6.
+triton-windows<3.3
