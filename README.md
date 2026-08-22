@@ -60,7 +60,7 @@ Example v4 commands:
 
 ```bash
 python run.py prepare --data-dir data-v4 --target-tokens 3e9 --vocab-size 24576 --seq-len 2048 \
-  --mid-frac 0.12 --sft-target-supervised 50e6 \
+  --mid-frac 0.12 --sft-target-supervised 60e6 \
   --mix "fineweb:0.55,wiki:0.15,maths:0.15,books:0.06,theses:0.04,chat:0.03,europarl:0.01,oral:0.01"
 python run.py train --data-dir data-v4 --run fr-v4 --preset v4-base --seq-len 2048
 python run.py mid --data-dir data-v4 --run fr-v4 --preset v4-base --seq-len 2048
@@ -111,6 +111,33 @@ pretrain binaries are not needed for these two Modal phases.
 
 Use `--check-only` to validate the exact command and Volume contents without
 starting a GPU function.
+
+### v4.2 quality-first SFT
+
+The v4.2 SFT keeps the v4.1 mid checkpoint and rebuilds only the supervised
+phase. It drops the noisy chatbot-style and long translated-reasoning sources,
+keeps human/human-style French conversations, ranked French OASST2 paths,
+short translation instructions, verified math, and a locally re-filtered French
+OpenHermes subset. Ordinary answers are no longer forced to start with an empty
+`<think>` block.
+
+The 60M assistant-token target is a quality cap: after filtering and global
+prompt deduplication, the retained mixture contains 51.46M supervised tokens in
+79.39M total tokens. Training uses AdamW at `1e-5`, an effective batch of 64
+sequences, 15% mid-data replay, and a macro validation loss across sources. At
+1,800 steps this processes 235.93M tokens (1.03 token per model parameter), of
+which roughly 200.5M come from the SFT mixture, or about 2.5 effective sweeps.
+
+```bash
+python run.py prepare --data-dir data-v4 --rebin --sft-only --skip-download \
+  --seq-len 2048 --sft-target-supervised 60e6
+
+modal run --detach modal_app.py --gpu h100 --spawn --cmd \
+  "python run.py sft --data-dir data-v4 --run fr-v4-v42 --preset v4-base --seq-len 2048 --batch-size 16 --grad-accum 4 --max-steps 1800 --optimizer adamw --lr 0.00001 --weight-decay 0.01 --schedule cosine --warmup 50 --replay-frac 0.15 --eval-every 100 --eval-iters 42 --sample-every 100 --resume /vol/runs/fr-v4-v41/mid/ckpt_best.pt"
+```
+
+Only upload the tokenizer, `sft_train.bin`/mask, the global and per-source SFT
+validation files, and `meta.json`. Raw JSONL files remain local and untracked.
 
 ---
 
@@ -265,10 +292,10 @@ decays. It concentrates reasoning late without sacrificing the language substrat
 3. **The midtrain.** A short annealing phase on concentrated data between pretraining
    and SFT — the modern-lab recipe, at RTX 4060 scale.
 
-4. **`<think>` discipline.** During SFT every answer opens with a thinking block —
-   **filled with steps for problems, empty for small talk**. The model learns *when*
-   to think, not just how: no 500-token detour to say hello, no answering a math
-   problem without a scratchpad.
+4. **`<think>` discipline.** The historical v2-v4.1 recipe opened every answer with
+   a thinking block, including an empty one for small talk. The v4.2 SFT is stricter:
+   only examples with a genuine verified reasoning trace contain `<think>`; ordinary
+   dialogue starts directly with the answer.
 
 ---
 

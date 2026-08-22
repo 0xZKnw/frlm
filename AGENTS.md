@@ -74,7 +74,7 @@ python run.py chat --run fr-v4
 Pipeline principal :
 
 ```powershell
-python run.py prepare --data-dir data-v4 --target-tokens 3e9 --vocab-size 24576 --seq-len 2048 --mid-frac 0.12 --sft-target-supervised 50e6 --mix "fineweb:0.55,wiki:0.15,maths:0.15,books:0.06,theses:0.04,chat:0.03,europarl:0.01,oral:0.01"
+python run.py prepare --data-dir data-v4 --target-tokens 3e9 --vocab-size 24576 --seq-len 2048 --mid-frac 0.12 --sft-target-supervised 60e6 --mix "fineweb:0.55,wiki:0.15,maths:0.15,books:0.06,theses:0.04,chat:0.03,europarl:0.01,oral:0.01"
 python run.py train --data-dir data-v4 --run fr-v4 --preset v4-base --seq-len 2048
 python run.py mid --data-dir data-v4 --run fr-v4 --preset v4-base --seq-len 2048
 python run.py sft --data-dir data-v4 --run fr-v4 --preset v4-base --seq-len 2048
@@ -82,17 +82,19 @@ python run.py rl --run fr-v4
 python run.py rlaif --run fr-v4
 ```
 
-Pour refaire uniquement le post-training v4.1 à partir du tokenizer existant :
+Pour refaire uniquement le SFT v4.2 à partir du tokenizer et du mid v4.1 existants :
 
 ```powershell
 python -m frlm.audit_data --data-dir data-v4
-python run.py prepare --data-dir data-v4 --rebin --skip-download --mid-frac 0.12 --seq-len 2048 --sft-target-supervised 50e6
+python run.py prepare --data-dir data-v4 --rebin --sft-only --skip-download --seq-len 2048 --sft-target-supervised 60e6
 ```
 
-Cette recette déduplique globalement les prompts, filtre les réponses cassées ou
-répétitives, borne les traces `<think>`, pondère le SFT par tokens assistant et aligne
-les fenêtres SFT sur le début des conversations. Utiliser un nouveau nom de run pour
-une nouvelle passe et reprendre explicitement le meilleur checkpoint pretrain.
+Cette recette déduplique globalement les prompts, retire les sources chatbot/bruitées,
+filtre les réponses cassées ou répétitives, n'impose plus de bloc `<think>` vide,
+pondère le SFT par tokens assistant et aligne les fenêtres sur le début des
+conversations. Le trainer rejoue 15 % du corpus mid et choisit le meilleur checkpoint
+sur une validation macro par source. Utiliser un nouveau nom de run et reprendre
+explicitement `runs/fr-v4-v41/mid/ckpt_best.pt` ; ne pas relancer le mid.
 
 Benchmarks :
 

@@ -107,6 +107,9 @@ def _required_files(cmd: str, root: Path = Path("/root/app")) -> tuple[str | Non
                 data_dir / f"{prefix}val.bin"]
     if stage == "sft":
         required += [data_dir / "sft_train.mask", data_dir / "sft_val.mask"]
+        replay_frac = float(_arg(parts, "--replay-frac", "0") or "0")
+        if replay_frac > 0:
+            required += [data_dir / "mid_train.bin", data_dir / "mid_val.bin"]
     return stage, required, _resume_candidates(parts, stage, root)
 
 
@@ -148,8 +151,8 @@ def _check_command(cmd: str) -> None:
         meta_path = data_dir / "meta.json"
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            if (meta.get("sft") or {}).get("recipe") != "v4.1-quality":
-                raise ValueError("meta.json ne décrit pas la recette v4.1-quality")
+            if stage == "sft" and (meta.get("sft") or {}).get("recipe") != "v4.2-quality-replay":
+                raise ValueError("meta.json ne décrit pas la recette v4.2-quality-replay")
             section = meta["midtrain"] if stage == "mid" else meta["sft"]
             expected = {
                 required[1]: int(section["train_tokens"]) * 2,
@@ -158,6 +161,14 @@ def _check_command(cmd: str) -> None:
             if stage == "sft":
                 expected[required[3]] = int(section["train_tokens"])
                 expected[required[4]] = int(section["val_tokens"])
+                for source in section.get("eval_sources", []):
+                    source_meta = section["sources"][source]
+                    source_bin = data_dir / f"sft_val_{source}.bin"
+                    source_mask = data_dir / f"sft_val_{source}.mask"
+                    expected[source_bin] = int(source_meta["val_tokens_unique"]) * 2
+                    expected[source_mask] = int(source_meta["val_tokens_unique"])
+                    if not source_bin.is_file() or not source_mask.is_file():
+                        raise ValueError(f"validation équilibrée absente pour {source}")
             stale = [path for path, size in expected.items() if path.stat().st_size != size]
             if stale:
                 raise ValueError("tailles incompatibles avec meta.json : "
@@ -165,7 +176,7 @@ def _check_command(cmd: str) -> None:
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError(
                 f"Préflight Modal échoué : les données {stage} du Volume sont anciennes "
-                f"ou incohérentes ({exc}). Réuploade les bins, masks et meta.json v4.1 ; "
+                f"ou incohérentes ({exc}). Réuploade les bins, masks et meta.json v4.2 ; "
                 "aucun GPU n'a été alloué."
             ) from exc
     if required:

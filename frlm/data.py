@@ -22,6 +22,7 @@ import json
 import os
 import random
 import re
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass
@@ -60,6 +61,17 @@ SOURCES: dict[str, Source] = {
     "fineweb": Source("fineweb", "epfml/FineWeb2-HQ", "fra_Latn", "train", "text"),
     "wiki": Source("wiki", "wikimedia/wikipedia", "20231101.fr", "train", "text"),
     "chat": Source("chat", "angeluriot/french_instruct", None, "train", "chat"),
+    # v4.2 : uniquement la tranche réellement écrite par des humains ET annotée
+    # comme ayant un style humain. Le jeu complet est à 70 % écrit par chatbot.
+    "chat_human": Source("chat_human", "angeluriot/french_instruct", None, "train", "chat_human"),
+    # Conversations humaines françaises avec réponses classées par préférence.
+    "oasst_fr": Source("oasst_fr", "OpenAssistant/oasst2", None, "train", "oasst"),
+    # Petit sous-ensemble français propre du corpus officiel Luciole 1.1.
+    "croissant": Source("croissant", "OpenLLM-France/Luciole-PostTraining-Dataset-1.1",
+                         "sft_instruct", "croissant_aligned_instruct", "messages"),
+    # Distillation GPT-4o française ; les drapeaux qualité sont revalidés localement
+    # et les exercices numériques/code sont exclus au profit des sources vérifiables.
+    "openhermes_fr": Source("openhermes_fr", "legmlai/openhermes-fr", None, "train", "openhermes"),
     "alpaca": Source("alpaca", "jpacifico/French-Alpaca-dataset-Instruct-110K", None, "train", "alpaca"),
     # dolphin-r1 traduit en français : réponses avec trace de raisonnement complète.
     # Converti au format <think>...</think> de Qwen3 pour le mode "thinking".
@@ -82,8 +94,10 @@ SOURCES: dict[str, Source] = {
 }
 
 # Budgets de téléchargement (en caractères) des sources SFT hors mix de pré-entraînement.
-SFT_BUDGETS = {"alpaca": 40_000_000, "reasoning": 90_000_000,
-               "gsm8k": 12_000_000, "maths_sft": 25_000_000}
+SFT_BUDGETS = {"chat_human": 65_000_000, "oasst_fr": 30_000_000,
+               "croissant": 6_000_000, "openhermes_fr": 600_000_000,
+               "gsm8k": 12_000_000,
+               "maths_sft": 25_000_000}
 # Un exemple de raisonnement plus long que ça ne rentrera jamais dans le contexte : on
 # le jette au téléchargement plutôt que de gaspiller le budget (~3,5 car/token).
 MAX_REASONING_CHARS = 3600
@@ -114,22 +128,27 @@ MID_MIX = {"maths": 0.30, "wiki": 0.33, "fineweb": 0.15,
 
 # Priorité qualité pour la déduplication inter-sources : si le même prompt existe
 # dans plusieurs jeux, on garde la version vérifiée/concise avant le gros jeu chat.
-SFT_SOURCE_ORDER = ("distill", "gsm8k", "maths_sft", "alpaca", "reasoning", "chat")
-MID_INSTRUCT_SOURCES = ("distill", "gsm8k", "alpaca", "reasoning", "chat")
+SFT_SOURCE_ORDER = ("identity", "distill", "gsm8k", "maths_sft",
+                    "openhermes_fr", "oasst_fr", "croissant", "chat_human")
+MID_INSTRUCT_SOURCES = ("distill", "gsm8k", "openhermes_fr",
+                        "oasst_fr", "croissant", "chat_human")
 
 # Parts visées en TOKENS SUPERVISÉS (pas en taille de fichier). Les limites de
 # répétition empêchent les petites sources de devenir des tables de mémorisation ;
 # tout quota impossible à remplir est redistribué aux sources qui ont de la marge.
 SFT_RECIPE = {
-    "chat":       dict(weight=0.24, max_repeat=1, max_prompt=1200, max_final=1600, max_think=0),
-    "alpaca":     dict(weight=0.22, max_repeat=3, max_prompt=1200, max_final=1600, max_think=0),
-    "reasoning":  dict(weight=0.12, max_repeat=2, max_prompt=2000, max_final=1600, max_think=800),
-    "gsm8k":      dict(weight=0.10, max_repeat=8, max_prompt=1400, max_final=500,  max_think=1200),
-    "maths_sft":  dict(weight=0.30, max_repeat=4, max_prompt=500,  max_final=300,  max_think=500),
-    "distill":    dict(weight=0.02, max_repeat=12, max_prompt=600, max_final=500,  max_think=500),
+    "identity":   dict(weight=0.01, max_repeat=4, max_prompt=500,  max_final=500,  max_think=0),
+    "distill":    dict(weight=0.04, max_repeat=2, max_prompt=800,  max_final=700,  max_think=700),
+    "gsm8k":      dict(weight=0.10, max_repeat=2, max_prompt=1400, max_final=500,  max_think=1200),
+    "maths_sft":  dict(weight=0.18, max_repeat=1, max_prompt=600,  max_final=350,  max_think=600),
+    "openhermes_fr": dict(weight=0.30, max_repeat=1, max_prompt=1400, max_final=1800, max_think=0),
+    "oasst_fr":   dict(weight=0.04, max_repeat=2, max_prompt=1800, max_final=1800, max_think=0),
+    "croissant":  dict(weight=0.08, max_repeat=2, max_prompt=1600, max_final=1600, max_think=0),
+    "chat_human": dict(weight=0.25, max_repeat=1, max_prompt=1800, max_final=1800, max_think=0),
 }
-SFT_TARGET_SUPERVISED = 50_000_000
-SFT_VAL_SUPERVISED_PER_SOURCE = 100_000
+SFT_TARGET_SUPERVISED = 60_000_000
+SFT_VAL_SUPERVISED_PER_SOURCE = 40_000
+SFT_RECIPE_NAME = "v4.2-quality-replay"
 
 
 def render_chat(messages: list[dict]) -> str:
@@ -178,10 +197,14 @@ def _iter_source(src: Source, seed: int = 0):
     """Générateur de documents. Chaque élément : (texte, messages|None)."""
     from datasets import load_dataset
 
-    kw = dict(split=src.split, streaming=True)
+    streaming = src.kind != "openhermes"
+    kw = dict(split=src.split, streaming=streaming)
     if src.config:
         kw["name"] = src.config
     ds = load_dataset(src.repo, **kw)
+    if src.kind == "oasst":
+        yield from _iter_oasst_conversations(ds)
+        return
     if src.kind in ("text", "book"):
         # FineWeb2-HQ traîne une colonne embeddings (~2-3× le poids du texte) :
         # la projeter AVANT le shuffle allège le téléchargement ET le buffer
@@ -189,7 +212,8 @@ def _iter_source(src: Source, seed: int = 0):
             ds = ds.select_columns(["text"])
         except Exception:
             pass
-    ds = ds.shuffle(seed=seed, buffer_size=10_000)
+    ds = (ds.shuffle(seed=seed, buffer_size=10_000) if streaming
+          else ds.shuffle(seed=seed))
 
     for row in ds:
         if src.kind == "text":
@@ -200,6 +224,17 @@ def _iter_source(src: Source, seed: int = 0):
         elif src.kind == "chat":
             conv = row.get("conversation") or []
             msgs = [{"role": m["role"], "text": m.get("text", "")} for m in conv]
+            if len(msgs) < 2:
+                continue
+            yield render_chat(msgs), msgs
+        elif src.kind == "chat_human":
+            if row.get("author") != "human" or row.get("style") != "human" or row.get("code"):
+                continue
+            conv = row.get("conversation") or []
+            msgs = [{"role": m["role"], "text": m.get("text", "")} for m in conv]
+            context = (row.get("context") or "").strip()
+            if context and msgs and msgs[0].get("role") == "user":
+                msgs[0]["text"] = f"Contexte :\n{context}\n\n{msgs[0]['text']}"
             if len(msgs) < 2:
                 continue
             yield render_chat(msgs), msgs
@@ -225,6 +260,30 @@ def _iter_source(src: Source, seed: int = 0):
             if msgs is None:
                 continue
             yield render_chat(msgs), msgs
+        elif src.kind == "messages":
+            msgs = []
+            for message in row.get("messages") or []:
+                role = message.get("role")
+                content = (message.get("content") or message.get("text") or "").strip()
+                if role in ("system", "user", "assistant") and content:
+                    msgs.append({"role": role, "text": content})
+            if any(m["role"] == "user" for m in msgs) and any(m["role"] == "assistant" for m in msgs):
+                yield render_chat(msgs), msgs
+        elif src.kind == "openhermes":
+            if row.get("bad_entry") or row.get("bad_prompt_detected") or row.get("bad_response_detected"):
+                continue
+            prompt = (row.get("prompt") or "").strip()
+            answer = (row.get("accepted_completion") or "").strip()
+            # Les maths ont déjà des réponses calculées par Python/GSM8K. Ici on
+            # recherche uniquement de la diversité instructionnelle fiable.
+            mathish = (sum(ch.isdigit() for ch in prompt) > 3
+                       or re.search(r"\b(?:calcul|équation|combien|pourcentage|probabilité)\b",
+                                    prompt, re.IGNORECASE))
+            codeish = "```" in answer or re.search(r"#include|def\s+\w+\(|function\s+\w+\(", answer)
+            if not prompt or not answer or mathish or codeish or not _looks_french(answer):
+                continue
+            msgs = [{"role": "user", "text": prompt}, {"role": "assistant", "text": answer}]
+            yield render_chat(msgs), msgs
         elif src.kind == "book":
             t = _clean_book(row.get("text") or "")
             if len(t) < 2000:            # un livre nettoyé trop court = surtout du bruit
@@ -237,6 +296,70 @@ def _iter_source(src: Source, seed: int = 0):
             if len(t) < 300:
                 continue
             yield t, None
+
+
+def _oasst_quality(row: dict) -> float:
+    labels = row.get("labels") or {}
+    names, values = labels.get("name") or [], labels.get("value") or []
+    scores = dict(zip(names, values))
+    return float(scores.get("quality", scores.get("helpfulness", 0.0)) or 0.0)
+
+
+def _looks_french(text: str) -> bool:
+    if len(text) < 40:
+        return True
+    words = {w.casefold() for w in re.findall(r"[A-Za-zÀ-ÿ']+", text)}
+    signals = {"le", "la", "les", "de", "des", "une", "est", "et", "pour", "dans", "vous", "qui"}
+    return len(words & signals) >= 3
+
+
+def _iter_oasst_conversations(ds):
+    """Extrait un seul chemin français, humain et bien classé par arbre OASST2."""
+    current_tree = None
+    rows: list[dict] = []
+
+    def emit(tree_rows: list[dict]):
+        usable = [r for r in tree_rows
+                  if r.get("lang") == "fr" and not r.get("deleted")
+                  and not r.get("synthetic") and r.get("review_result") is not False]
+        by_parent: dict[str | None, list[dict]] = {}
+        for row in usable:
+            by_parent.setdefault(row.get("parent_id"), []).append(row)
+        roots = [r for r in by_parent.get(None, []) if r.get("role") == "prompter"]
+        for root in roots[:1]:
+            messages = [{"role": "user", "text": (root.get("text") or "").strip()}]
+            node = root
+            for _ in range(5):
+                children = by_parent.get(node.get("message_id"), [])
+                wanted = "assistant" if node.get("role") == "prompter" else "prompter"
+                children = [r for r in children if r.get("role") == wanted]
+                if wanted == "assistant":
+                    children = [r for r in children if r.get("rank") in (0, None)
+                                and _oasst_quality(r) >= 0.5]
+                if not children:
+                    break
+                node = max(children, key=lambda r: (_oasst_quality(r), -(r.get("rank") or 0)))
+                text = (node.get("text") or "").strip()
+                if not text:
+                    break
+                messages.append({"role": "assistant" if wanted == "assistant" else "user",
+                                 "text": text})
+            if len(messages) >= 2 and messages[-1]["role"] == "assistant":
+                return render_chat(messages), messages
+        return None
+
+    for row in ds:
+        tree = row.get("message_tree_id")
+        if current_tree is not None and tree != current_tree:
+            result = emit(rows)
+            if result is not None:
+                yield result
+            rows = []
+        current_tree = tree
+        rows.append(row)
+    result = emit(rows)
+    if result is not None:
+        yield result
 
 
 def _convert_gsm8k(question: str, answer: str) -> list[dict] | None:
@@ -479,6 +602,15 @@ def encode_pretrain(tok, jsonl_paths: list[Path], out_dir: Path, val_frac: float
 _THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 _WORDS_RE = re.compile(r"[\wÀ-ÿ]+", re.UNICODE)
 _WS_RE = re.compile(r"\s+")
+_FOREIGN_ASSISTANT_RE = re.compile(
+    r"\b(?:chatgpt|openai|gpt-?4|luciole|qwen|mistral|llama|claude)\b|"
+    r"\ben tant que (?:modèle de langage|intelligence artificielle|ia)\b",
+    re.IGNORECASE,
+)
+_INVENTED_PERSONA_RE = re.compile(
+    r"\bje m['’]appelle\s+[A-ZÀ-ÖØ-Ý][\wÀ-ÿ-]+|\bj['’]ai\s+\d{1,3}\s+ans\b",
+    re.IGNORECASE,
+)
 
 
 def _prompt_fingerprint(messages: list[dict]) -> bytes:
@@ -497,13 +629,7 @@ def _repetition_ratio(text: str, n: int = 4) -> float:
 
 
 def _prepare_sft_messages(record: dict, source: str) -> tuple[list[dict] | None, bytes | None, str | None]:
-    """Nettoie un exemple et raccourcit les traces de raisonnement trop longues.
-
-    Les longues traces Dolphin ne sont pas jetées : on garde leur réponse finale,
-    mais avec un bloc think vide ajouté plus tard par ``chat_segments``. Le modèle
-    profite ainsi de la couverture instructionnelle sans apprendre les monologues
-    qui ont provoqué les ``think-fleuves`` de la première v4.
-    """
+    """Nettoie un exemple et écarte les identités/personas contradictoires."""
     cfg = SFT_RECIPE.get(source)
     messages = record.get("m")
     if cfg is None or not isinstance(messages, list):
@@ -532,13 +658,19 @@ def _prepare_sft_messages(record: dict, source: str) -> tuple[list[dict] | None,
             if not final:
                 return None, None, "reponse_finale_vide"
             think_chars = sum(len(block.strip()) for block in blocks)
-            if blocks and think_chars > cfg["max_think"]:
+            # Un bloc vide n'enseigne aucun raisonnement et pousse le modèle à
+            # émettre le tic artificiel `<think></think>` sur les réponses simples.
+            if blocks and (think_chars == 0 or think_chars > cfg["max_think"]):
                 content = final
                 stripped_think = True
             if len(final) > cfg["max_final"]:
                 return None, None, "reponse_trop_longue"
             if _repetition_ratio(final) > 0.35:
                 return None, None, "repetition"
+            if source != "identity" and _FOREIGN_ASSISTANT_RE.search(final):
+                return None, None, "identite_etrangere"
+            if source in ("chat_human", "oasst_fr", "croissant") and _INVENTED_PERSONA_RE.search(final):
+                return None, None, "persona_inventee"
         clean.append({"role": role, "text": content})
 
     if n_user == 0 or n_assistant == 0:
@@ -628,6 +760,11 @@ def encode_sft(tok, jsonl_paths: list[Path], out_dir: Path, max_len: int = 1024,
     ordered = [s for s in SFT_SOURCE_ORDER if s in paths]
     seen_prompts: set[bytes] = set()
     source_reports: dict[str, dict] = {}
+    eval_sources: list[str] = []
+
+    # Évite qu'une ancienne source supprimée de la recette reste découverte par le trainer.
+    for stale in list(out_dir.glob("sft_val_*.bin")) + list(out_dir.glob("sft_val_*.mask")):
+        stale.unlink(missing_ok=True)
 
     with tempfile.TemporaryDirectory(prefix=".sft-build-", dir=out_dir) as tmp_name:
         tmp = Path(tmp_name)
@@ -652,7 +789,9 @@ def encode_sft(tok, jsonl_paths: list[Path], out_dir: Path, max_len: int = 1024,
 
                 ids: list[int] = []
                 mask: list[int] = []
-                for text, learn in chat_segments(messages, ensure_think=True):
+                # Les réponses ordinaires restent ordinaires. Seules les sources
+                # qui contiennent une vraie trace apprennent explicitement <think>.
+                for text, learn in chat_segments(messages, ensure_think=False):
                     enc = tok.encode(text).ids
                     ids += enc
                     mask += [1 if learn else 0] * len(enc)
@@ -677,6 +816,14 @@ def encode_sft(tok, jsonl_paths: list[Path], out_dir: Path, max_len: int = 1024,
             val_w.close()
             stats["train_tokens_unique"] = (tmp / f"{source}_train.bin").stat().st_size // 2
             stats["val_tokens_unique"] = (tmp / f"{source}_val.bin").stat().st_size // 2
+            if stats["val_tokens_unique"] >= max_len + 1 and stats["val_supervised"] > 0:
+                for suffix in ("bin", "mask"):
+                    src = tmp / f"{source}_val.{suffix}"
+                    dst = out_dir / f"sft_val_{source}.{suffix}"
+                    tmp_dst = dst.with_suffix(dst.suffix + ".tmp")
+                    shutil.copyfile(src, tmp_dst)
+                    os.replace(tmp_dst, dst)
+                eval_sources.append(source)
             stats["rejected_or_transformed"] = rejected
             source_reports[source] = stats
 
@@ -702,12 +849,13 @@ def encode_sft(tok, jsonl_paths: list[Path], out_dir: Path, max_len: int = 1024,
         val_w.close()
 
     return {
-        "recipe": "v4.1-quality",
+        "recipe": SFT_RECIPE_NAME,
         "target_supervised_tokens": int(target_supervised),
         "train_tokens": train_tokens,
         "val_tokens": val_tokens,
         "supervised_tokens": sum(s["mixed_train_supervised"] for s in source_reports.values()),
         "val_supervised_tokens": sum(s["mixed_val_supervised"] for s in source_reports.values()),
+        "eval_sources": eval_sources,
         "sources": source_reports,
     }
 
@@ -920,6 +1068,7 @@ def build_sft(tok, data_dir: Path, mix: dict[str, float] | None = None,
     report = report if report is not None else {}
     mix = mix or {}
     raw_dir = Path(data_dir) / "raw"
+    _write_curated_identity(raw_dir / "identity.jsonl")
     for name, budget in SFT_BUDGETS.items():
         p = raw_dir / f"{name}.jsonl"
         if name in mix:
@@ -929,7 +1078,7 @@ def build_sft(tok, data_dir: Path, mix: dict[str, float] | None = None,
         else:
             report.setdefault("download_sft", []).append(download_source(name, budget, p, seed=seed))
     chat_paths = [raw_dir / f"{n}.jsonl"
-                  for n in ("chat", "alpaca", "reasoning", "gsm8k", "maths_sft", "distill")
+                  for n in SFT_SOURCE_ORDER
                   if (raw_dir / f"{n}.jsonl").exists()]
     if not chat_paths:
         print("  (aucune source de dialogue téléchargée — SFT ignoré)")
@@ -939,9 +1088,49 @@ def build_sft(tok, data_dir: Path, mix: dict[str, float] | None = None,
     return report
 
 
+def _write_curated_identity(path: Path) -> None:
+    """Petit noyau revu à la main : identité stable et comportement honnête."""
+    identity_prompts = [
+        "Qui es-tu ?", "Comment t'appelles-tu ?", "Présente-toi brièvement.",
+        "Quel est ton nom ?", "Tu peux te présenter en une phrase ?",
+        "Es-tu un humain ?", "Que peux-tu faire ?", "À quoi sers-tu ?",
+    ]
+    identity_answers = [
+        "Je suis frlm, un petit modèle de langage français conçu pour aider, expliquer et raisonner.",
+        "Je m'appelle frlm. Je suis un modèle de langage français, pas une personne.",
+        "Je suis frlm, un assistant expérimental francophone. Je peux répondre, expliquer et résoudre des problèmes simples.",
+        "Je suis frlm. Je n'ai ni âge, ni métier, ni vie personnelle : je génère du texte pour vous aider.",
+    ]
+    behavior = [
+        ("Que dois-tu faire si tu n'es pas certain d'une information ?",
+         "Je dois signaler clairement mon incertitude, éviter d'inventer et demander une précision si elle est nécessaire."),
+        ("Comment réponds-tu à une question simple ?",
+         "Je donne d'abord la réponse utile, puis une explication concise si elle apporte quelque chose."),
+        ("Et si une demande est ambiguë ?",
+         "J'explique brièvement l'ambiguïté et je demande la précision qui change réellement la réponse."),
+        ("Dois-tu toujours écrire une longue réflexion ?",
+         "Non. Pour une question simple, une réponse directe suffit. Je réserve les étapes détaillées aux problèmes qui en ont besoin."),
+        ("Peux-tu inventer ton âge ou ton métier pour te présenter ?",
+         "Non. Je suis frlm, un modèle de langage, et je ne dois pas m'attribuer une biographie humaine."),
+        ("Quel ton dois-tu employer ?",
+         "Un ton naturel, clair et adapté à la demande, sans formules mécaniques ni détails inutiles."),
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as stream:
+        for i, prompt in enumerate(identity_prompts):
+            messages = [{"role": "user", "text": prompt},
+                        {"role": "assistant", "text": identity_answers[i % len(identity_answers)]}]
+            stream.write(json.dumps({"t": render_chat(messages), "m": messages}, ensure_ascii=False) + "\n")
+        for prompt, answer in behavior:
+            messages = [{"role": "user", "text": prompt},
+                        {"role": "assistant", "text": answer}]
+            stream.write(json.dumps({"t": render_chat(messages), "m": messages}, ensure_ascii=False) + "\n")
+
+
 def rebin_mid_sft(data_dir: Path, mid_frac: float = 0.2, max_seq_len: int = 1024,
                   seed: int = 0,
-                  sft_target_supervised: int = SFT_TARGET_SUPERVISED) -> dict:
+                  sft_target_supervised: int = SFT_TARGET_SUPERVISED,
+                  sft_only: bool = False) -> dict:
     """Re-binarise UNIQUEMENT mid + SFT avec le tokenizer EXISTANT.
 
     À utiliser quand les recettes (MID_MIX, sur-échantillonnage, nouveau distill.jsonl)
@@ -962,11 +1151,13 @@ def rebin_mid_sft(data_dir: Path, mid_frac: float = 0.2, max_seq_len: int = 1024
     cpt = float((meta.get("pretrain") or {}).get("chars_per_token") or 3.6)
 
     report: dict = {}
-    print(f"[1/2] Re-binarisation du midtrain (target {target_tokens/1e6:.0f}M tok, "
-          f"{cpt} c/tok, tokenizer conservé)")
-    build_mid(tok, data_dir, target_tokens, mid_frac, chars_per_token=cpt,
-              skip_download=True, seed=seed, report=report)
-    print("\n[2/2] Re-binarisation du SFT")
+    if not sft_only:
+        print(f"[1/2] Re-binarisation du midtrain (target {target_tokens/1e6:.0f}M tok, "
+              f"{cpt} c/tok, tokenizer conservé)")
+        build_mid(tok, data_dir, target_tokens, mid_frac, chars_per_token=cpt,
+                  skip_download=True, seed=seed, report=report)
+    print("\n[2/2] Re-binarisation du SFT" if not sft_only
+          else "[1/1] Re-binarisation du SFT uniquement (mid et pretrain conservés)")
     build_sft(tok, data_dir, mix=meta.get("mix"), max_seq_len=max_seq_len,
               target_supervised=sft_target_supervised,
               skip_download=True, seed=seed, report=report)

@@ -16,7 +16,8 @@ from collections import Counter
 from pathlib import Path
 
 
-DEFAULT_SOURCES = ("chat", "alpaca", "reasoning", "gsm8k", "maths_sft", "distill")
+DEFAULT_SOURCES = ("identity", "distill", "gsm8k", "maths_sft",
+                   "openhermes_fr", "oasst_fr", "croissant", "chat_human")
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 _WS_RE = re.compile(r"\s+")
 

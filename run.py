@@ -142,6 +142,7 @@ class TrainConfig:
     decay_frac: float = 0.2
     z_loss: float = 1e-4
     max_steps: int = 20000
+    replay_frac: float = 0.0          # part de batchs mid rejoués pendant le SFT
 
     # évaluation / logs
     eval_every: int = 500
@@ -246,6 +247,22 @@ class Trainer:
         masked = cfg.stage == "sft"
         self.train_data = D.BinCorpus(train_bin, cfg.seq_len, with_mask=masked)
         self.val_data = D.BinCorpus(val_bin, cfg.seq_len, with_mask=masked)
+        self.val_sources: dict[str, D.BinCorpus] = {}
+        self.replay_train = self.replay_val = None
+        if masked:
+            for source_path in sorted(data_dir.glob("sft_val_*.bin")):
+                source = source_path.stem.removeprefix("sft_val_")
+                try:
+                    self.val_sources[source] = D.BinCorpus(source_path, cfg.seq_len, with_mask=True)
+                except ValueError as exc:
+                    print(f"[!] validation {source} ignorée ({exc})")
+            mid_train, mid_val = data_dir / "mid_train.bin", data_dir / "mid_val.bin"
+            if cfg.replay_frac > 0 and mid_train.exists() and mid_val.exists():
+                self.replay_train = D.BinCorpus(mid_train, cfg.seq_len)
+                self.replay_val = D.BinCorpus(mid_val, cfg.seq_len)
+                print(f"[i] replay anti-oubli actif : {100*cfg.replay_frac:.0f} % de batchs mid")
+            elif cfg.replay_frac > 0:
+                sys.exit("[!] --replay-frac exige mid_train.bin et mid_val.bin dans --data-dir")
 
         # ---- modèle ------------------------------------------------------------------
         # le nom du preset choisit l'architecture : "v3-*" -> model_v3 (speedrun)
@@ -270,6 +287,8 @@ class Trainer:
         self.best_val = float("inf")
         self.elapsed_prev = 0.0
         self.val_loss = float("nan")
+        self.val_breakdown: dict[str, float] = {}
+        self.replay_val_loss = float("nan")
         self.last_sample = ""
         self.last_sample_step = 0
 
@@ -390,14 +409,30 @@ class Trainer:
     @torch.no_grad()
     def evaluate(self) -> float:
         self.model.eval()
-        losses = []
-        for i in range(self.cfg.eval_iters):
-            x, y, m = self.val_data.get_batch(i, self.cfg.batch_size, seed=999, device=self.device)
-            with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.device.startswith("cuda")):
-                _, loss, _ = self.model(x, y, m, z_loss=0.0, diagnostics=False)
-            losses.append(loss.item())
+        def corpus_loss(corpus, n_iters: int, seed: int) -> float:
+            losses = []
+            for i in range(n_iters):
+                x, y, m = corpus.get_batch(i, self.cfg.batch_size, seed=seed, device=self.device)
+                with torch.autocast("cuda", dtype=self.amp_dtype,
+                                    enabled=self.device.startswith("cuda")):
+                    _, loss, _ = self.model(x, y, m, z_loss=0.0, diagnostics=False)
+                losses.append(loss.item())
+            return float(np.mean(losses))
+
+        if self.val_sources:
+            per_source_iters = max(2, self.cfg.eval_iters // len(self.val_sources))
+            self.val_breakdown = {
+                source: corpus_loss(corpus, per_source_iters, seed=999 + i * 17)
+                for i, (source, corpus) in enumerate(self.val_sources.items())
+            }
+            val = float(np.mean(list(self.val_breakdown.values())))
+        else:
+            self.val_breakdown = {}
+            val = corpus_loss(self.val_data, self.cfg.eval_iters, seed=999)
+        if self.replay_val is not None:
+            self.replay_val_loss = corpus_loss(self.replay_val, min(6, self.cfg.eval_iters), seed=1777)
         self.model.train()
-        return float(np.mean(losses))
+        return val
 
     @torch.no_grad()
     def sample(self, prompt: str | None = None) -> str:
@@ -500,7 +535,11 @@ class Trainer:
                     idx = self.step * cfg.grad_accum + micro
                     if profile:
                         torch.cuda.synchronize(); t0 = time.perf_counter()
-                    x, y, m = self.train_data.get_batch(idx, cfg.batch_size, cfg.seed, self.device)
+                    replay = (self.replay_train is not None
+                              and (idx * 9973 + cfg.seed) % 10_000 < round(cfg.replay_frac * 10_000))
+                    corpus = self.replay_train if replay else self.train_data
+                    batch_seed = cfg.seed + 101 if replay else cfg.seed
+                    x, y, m = corpus.get_batch(idx, cfg.batch_size, batch_seed, self.device)
                     if profile:
                         torch.cuda.synchronize(); t1 = time.perf_counter(); t_data += t1 - t0
 
@@ -560,9 +599,22 @@ class Trainer:
                         self.best_val = self.val_loss
                         is_best = True
                     if not interactive:
+                        detail = "".join(f" · {name} {value:.3f}"
+                                         for name, value in self.val_breakdown.items())
+                        replay_detail = (f" · mid {self.replay_val_loss:.3f}"
+                                         if self.replay_val_loss == self.replay_val_loss else "")
                         console.print(f"eval  step {self.step} · val {self.val_loss:.4f} · "
                                       f"ppl {math.exp(min(20, self.val_loss)):.1f}"
+                                      + detail + replay_detail
                                       + (" · meilleur" if is_best else ""))
+                    self.metrics_file.write(json.dumps({
+                        "step": self.step, "val": round(self.val_loss, 5),
+                        "val_sources": {k: round(v, 5) for k, v in self.val_breakdown.items()},
+                        "mid_val": (round(self.replay_val_loss, 5)
+                                    if self.replay_val_loss == self.replay_val_loss else None),
+                        "best": is_best,
+                    }) + "\n")
+                    self.metrics_file.flush()
 
                 if cfg.sample_every and self.step % cfg.sample_every == 0:
                     self.last_sample = self.sample()
@@ -930,6 +982,8 @@ def add_train_args(p):
     p.add_argument("--schedule", default="wsd", choices=["wsd", "cosine"])
     p.add_argument("--warmup", type=int, default=300)
     p.add_argument("--z-loss", type=float, default=1e-4)
+    p.add_argument("--replay-frac", type=float, default=0.0,
+                   help="fraction de batchs mid rejoués pendant le SFT (anti-oubli)")
     p.add_argument("--eval-every", type=int, default=500)
     p.add_argument("--eval-iters", type=int, default=40)
     p.add_argument("--sample-every", type=int, default=1000)
@@ -966,6 +1020,7 @@ def cfg_from_args(args, stage: str) -> TrainConfig:
         seq_len=args.seq_len, optimizer=args.optimizer, lr=lr, adam_lr=args.adam_lr,
         weight_decay=args.weight_decay, grad_clip=args.grad_clip, schedule=args.schedule,
         warmup=args.warmup, z_loss=args.z_loss, max_steps=args.max_steps,
+        replay_frac=args.replay_frac,
         eval_every=args.eval_every, eval_iters=args.eval_iters, sample_every=args.sample_every,
         ckpt_every_min=args.ckpt_every_min, keep_last=args.keep_last, compile=args.compile,
         dtype=args.dtype, seed=args.seed, gpu_peak_tflops=args.gpu_peak_tflops,
@@ -993,6 +1048,8 @@ def main():
     p.add_argument("--rebin", action="store_true",
                    help="re-binarise SEULEMENT mid+SFT avec le tokenizer existant "
                         "(après un changement de recette : distill, sur-échantillonnage…)")
+    p.add_argument("--sft-only", action="store_true",
+                   help="avec --rebin, reconstruit seulement le SFT et préserve les bins mid")
 
     p = sub.add_parser("train", help="pré-entraînement")
     add_train_args(p)
@@ -1008,10 +1065,11 @@ def main():
 
     p = sub.add_parser("sft", help="fine-tuning dialogue (masque de loss sur les réponses)")
     add_train_args(p)
-    # AdamW est plus conservateur pour l'alignement final ; 2500 steps = ~164M
-    # tokens de fenêtres à batch effectif 32, sans les 20k steps destructeurs d'avant.
-    p.set_defaults(max_steps=2500, schedule="cosine", warmup=50, optimizer="adamw",
-                   lr=8e-5, weight_decay=0.01, eval_every=100, sample_every=250)
+    # v4.2 : ~1 token traité par paramètre sur un corpus sélectionné, LR bas,
+    # batch effectif 64 et 15 % de replay mid pour limiter l'oubli catastrophique.
+    p.set_defaults(max_steps=1800, schedule="cosine", warmup=50, optimizer="adamw",
+                   lr=1e-5, weight_decay=0.01, grad_accum=4, replay_frac=0.15,
+                   eval_every=100, eval_iters=42, sample_every=100)
 
     p = sub.add_parser("rl", help="GRPO : renforcement à récompenses vérifiables (part du SFT)")
     p.add_argument("--run", default="fr-micro")
@@ -1093,10 +1151,11 @@ def main():
     if args.cmd == "prepare" and args.rebin:
         rep = D.rebin_mid_sft(Path(args.data_dir), mid_frac=args.mid_frac,
                               max_seq_len=args.seq_len,
-                              sft_target_supervised=int(args.sft_target_supervised))
+                              sft_target_supervised=int(args.sft_target_supervised),
+                              sft_only=args.sft_only)
         print("\n=== Récapitulatif ===")
         print(json.dumps(rep, indent=2, ensure_ascii=False))
-        print("\nÉtape suivante :  python run.py mid --resume latest")
+        print("\nÉtape suivante :  python run.py sft --resume <checkpoint-mid>")
 
     elif args.cmd == "prepare":
         mix = {}
