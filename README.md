@@ -97,15 +97,20 @@ conservative reproducible launch is:
 
 ```bash
 modal run --detach modal_app.py --gpu h100 --spawn --cmd \
-  "python run.py mid --data-dir data-v4 --run fr-v4-v41 --preset v4-base --seq-len 2048 --batch-size 16 --grad-accum 2 --max-steps 6000 --optimizer muon --lr 0.004 --adam-lr 0.0002 --schedule cosine --warmup 50 --eval-every 100 --resume runs/fr-v4/pretrain/ckpt_best.pt"
+  "python run.py mid --data-dir data-v4 --run fr-v4-v41 --preset v4-base --seq-len 2048 --batch-size 16 --grad-accum 2 --max-steps 6000 --optimizer muon --lr 0.004 --adam-lr 0.0002 --schedule cosine --warmup 50 --eval-every 100 --resume /vol/runs/fr-v4/pretrain/ckpt_latest.pt"
 
 modal run --detach modal_app.py --gpu h100 --spawn --cmd \
   "python run.py sft --data-dir data-v4 --run fr-v4-v41 --preset v4-base --seq-len 2048 --batch-size 16 --grad-accum 2 --max-steps 2500 --optimizer adamw --lr 0.00008 --weight-decay 0.01 --schedule cosine --warmup 50 --eval-every 100 --resume latest"
 ```
 
 Upload only `mid_train.bin`, `mid_val.bin`, the four `sft_*.bin`/`sft_*.mask`
-files, `meta.json`, and (if absent from the Volume) the pretrain checkpoint. Raw
-JSONL corpora and pretrain binaries are not needed for these two Modal phases.
+files and `meta.json` with `modal volume put --force`. The wrapper runs a CPU
+preflight, reloads reused containers, validates the v4.1 metadata/file sizes, and
+checks the resume checkpoint before allocating a GPU. Raw JSONL corpora and
+pretrain binaries are not needed for these two Modal phases.
+
+Use `--check-only` to validate the exact command and Volume contents without
+starting a GPU function.
 
 ---
 

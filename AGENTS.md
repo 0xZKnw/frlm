@@ -105,6 +105,8 @@ python bench/bench_vs.py --run fr-v4 --data-dir data-v4 --skip-hf
 Les commandes de préparation téléchargent et écrivent beaucoup de données. Les
 entraînements, `bench_speed` et certains benchmarks exigent un GPU et peuvent être
 longs ou coûteux. Ne pas les lancer comme simple validation sans accord explicite.
+Avant un entraînement Modal, utiliser l'option `--check-only` du wrapper pour
+valider sur CPU les bins, métadonnées et checkpoints du Volume sans allouer de GPU.
 
 ## Invariants à préserver
 

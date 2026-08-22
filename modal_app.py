@@ -11,13 +11,18 @@
 #   modal run modal_app.py                                        # bench_speed sur L40S
 #   modal run modal_app.py --gpu a100                             # bench_speed sur A100
 #   modal run modal_app.py --gpu a100 --cmd "python run.py train --preset v4-base ..."
+#   modal run modal_app.py --check-only --cmd "python run.py mid ..."  # CPU, aucun GPU
 #
 # Fichiers vers/depuis le Volume :
-#   modal volume put frlm-vol data-v4/mid_train.bin /data-v4/mid_train.bin
+#   modal volume put --force frlm-vol data-v4/mid_train.bin /data-v4/mid_train.bin
 #   # envoyer de même mid_val.bin, sft_*.bin, sft_*.mask et meta.json uniquement
 #   modal volume get frlm-vol /runs/fr-v4 runs/fr-v4              # rapatrier un ckpt
 # --------------------------------------------------------------------------------------
+import json
+import shlex
+import shutil
 import subprocess
+from pathlib import Path
 
 import modal
 
@@ -45,13 +50,143 @@ app = modal.App("frlm", image=image)
 vol = modal.Volume.from_name("frlm-vol", create_if_missing=True)
 
 
+def _workspace_path(value: str, root: Path = Path("/root/app")) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else root / path
+
+
+def _arg(parts: list[str], name: str, default: str | None = None) -> str | None:
+    if name not in parts:
+        return default
+    index = parts.index(name) + 1
+    if index >= len(parts) or parts[index].startswith("--"):
+        return default
+    return parts[index]
+
+
+def _resume_candidates(parts: list[str], stage: str, root: Path) -> list[Path]:
+    """Reproduit les replis latest/best de Trainer sans importer torch."""
+    if "--resume" not in parts:
+        return []
+    index = parts.index("--resume") + 1
+    spec = parts[index] if index < len(parts) and not parts[index].startswith("--") else "latest"
+    if spec not in ("latest", "auto", "", "best"):
+        path = _workspace_path(spec, root)
+        candidates = [path]
+        sibling = {"ckpt_best.pt": "ckpt_latest.pt",
+                   "ckpt_latest.pt": "ckpt_best.pt"}.get(path.name)
+        if sibling:
+            candidates.append(path.with_name(sibling))
+        return candidates
+
+    out_dir = _workspace_path(_arg(parts, "--out-dir", "runs") or "runs", root)
+    run_name = _arg(parts, "--run", "fr-micro") or "fr-micro"
+    run_dir = out_dir / run_name
+    phases = [stage]
+    if stage == "sft":
+        phases += ["mid", "pretrain"]
+    elif stage == "mid":
+        phases += ["pretrain"]
+    names = ["ckpt_best.pt"] if spec == "best" else ["ckpt_latest.pt", "ckpt_best.pt"]
+    return [run_dir / phase / name for phase in phases for name in names]
+
+
+def _required_files(cmd: str, root: Path = Path("/root/app")) -> tuple[str | None, list[Path], list[Path]]:
+    parts = shlex.split(cmd)
+    try:
+        run_index = next(i for i, value in enumerate(parts) if Path(value).name == "run.py")
+        stage = parts[run_index + 1]
+    except (StopIteration, IndexError):
+        return None, [], []
+    if stage not in ("train", "mid", "sft"):
+        return stage, [], []
+
+    data_dir = _workspace_path(_arg(parts, "--data-dir", "data") or "data", root)
+    prefix = {"train": "", "mid": "mid_", "sft": "sft_"}[stage]
+    required = [data_dir / "tokenizer.json", data_dir / f"{prefix}train.bin",
+                data_dir / f"{prefix}val.bin"]
+    if stage == "sft":
+        required += [data_dir / "sft_train.mask", data_dir / "sft_val.mask"]
+    return stage, required, _resume_candidates(parts, stage, root)
+
+
+def _mount_workspace() -> None:
+    """Recharge le Volume puis remplace les dossiers locaux par des liens fiables."""
+    vol.reload()
+    Path("/vol/runs").mkdir(parents=True, exist_ok=True)
+    for source, target in ((Path("/vol/data-v4"), Path("/root/app/data-v4")),
+                           (Path("/vol/runs"), Path("/root/app/runs"))):
+        if target.is_symlink():
+            target.unlink()
+        elif target.exists():
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        target.symlink_to(source, target_is_directory=True)
+
+
+def _check_command(cmd: str) -> None:
+    stage, required, resume_candidates = _required_files(cmd)
+    missing = [path for path in required if not path.is_file() or path.stat().st_size == 0]
+    if stage in ("mid", "sft") and "--resume" not in shlex.split(cmd):
+        raise RuntimeError(f"La phase {stage} exige --resume sur Modal pour éviter un "
+                           "démarrage coûteux à zéro.")
+    if resume_candidates and not any(path.is_file() and path.stat().st_size > 0
+                                     for path in resume_candidates):
+        missing.append(resume_candidates[0])
+    if missing:
+        details = "\n".join(f"  - {path}" for path in missing)
+        raise RuntimeError(
+            "Préflight Modal échoué, fichiers absents du Volume frlm-vol :\n"
+            f"{details}\n"
+            "Charge-les avec `modal volume put --force frlm-vol <local> <distant>` "
+            "avant de relancer. Aucun GPU n'a été alloué."
+        )
+    if stage in ("mid", "sft"):
+        data_dir = required[0].parent
+        meta_path = data_dir / "meta.json"
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if (meta.get("sft") or {}).get("recipe") != "v4.1-quality":
+                raise ValueError("meta.json ne décrit pas la recette v4.1-quality")
+            section = meta["midtrain"] if stage == "mid" else meta["sft"]
+            expected = {
+                required[1]: int(section["train_tokens"]) * 2,
+                required[2]: int(section["val_tokens"]) * 2,
+            }
+            if stage == "sft":
+                expected[required[3]] = int(section["train_tokens"])
+                expected[required[4]] = int(section["val_tokens"])
+            stale = [path for path, size in expected.items() if path.stat().st_size != size]
+            if stale:
+                raise ValueError("tailles incompatibles avec meta.json : "
+                                 + ", ".join(str(path) for path in stale))
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"Préflight Modal échoué : les données {stage} du Volume sont anciennes "
+                f"ou incohérentes ({exc}). Réuploade les bins, masks et meta.json v4.1 ; "
+                "aucun GPU n'a été alloué."
+            ) from exc
+    if required:
+        print(f"[ok] Préflight {stage} : {len(required)} fichiers de données et "
+              f"{'un checkpoint' if resume_candidates else 'aucun checkpoint requis'} disponibles.")
+
+
+@app.function(volumes={"/vol": vol}, timeout=5 * 60)
+def preflight(cmd: str) -> None:
+    """Vérifie le Volume sur CPU avant de louer un GPU."""
+    _mount_workspace()
+    _check_command(cmd)
+
+
 def _executer(cmd: str, peak: float) -> None:
     import threading
 
-    # les chemins data-v4/ et runs/ du dépôt pointent vers le Volume persistant
-    subprocess.run("ln -sfn /vol/data-v4 /root/app/data-v4 && "
-                   "mkdir -p /vol/runs && ln -sfn /vol/runs /root/app/runs",
-                   shell=True, check=True)
+    # Important pour un conteneur GPU réutilisé après un `modal volume put` : sans
+    # reload, il peut garder l'ancien snapshot et croire le checkpoint absent.
+    _mount_workspace()
+    _check_command(cmd)
     if ("--gpu-peak-tflops" not in cmd
             and any(k in cmd for k in ("bench_speed", " train", " mid", " sft"))):
         cmd += f" --gpu-peak-tflops {peak}"
@@ -96,8 +231,15 @@ def run_b200(cmd: str) -> None:      # 6,25 $/h, ~360 TFLOPS/$ crête — risque
 
 
 @app.local_entrypoint()
-def main(cmd: str = BENCH, gpu: str = "a100", spawn: bool = False):
+def main(cmd: str = BENCH, gpu: str = "a100", spawn: bool = False,
+         check_only: bool = False):
     fns = {"l40s": run_l40s, "a100": run_a100, "h100": run_h100, "b200": run_b200}
+    # Le préflight tourne sans GPU. Une faute de chemin ou un upload oublié ne
+    # consomme donc plus une allocation H100 pour échouer une seconde plus tard.
+    preflight.remote(cmd)
+    if check_only:
+        print("Préflight terminé : Volume et checkpoint cohérents, aucun GPU lancé.")
+        return
     if spawn:
         # fire-and-forget : à utiliser avec --detach pour les runs longs.
         # Un Ctrl+C sur un .remote() bloquant ANNULE l'appel en cours (vécu le

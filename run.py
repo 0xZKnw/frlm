@@ -324,6 +324,18 @@ class Trainer:
 
     def load_checkpoint(self, spec: str):
         path = self.ckpt.resolve(spec)
+        if path is None:
+            # Un Volume peut ne contenir que latest alors que la copie locale ne
+            # contient que best (ou inversement). Pour un chemin explicite, essayer
+            # le checkpoint frère de la même phase avant tout autre repli.
+            requested = Path(spec)
+            sibling = {"ckpt_best.pt": "ckpt_latest.pt",
+                       "ckpt_latest.pt": "ckpt_best.pt"}.get(requested.name)
+            if sibling:
+                alternate = requested.with_name(sibling)
+                if alternate.exists():
+                    path = alternate
+                    print(f"[i] {requested.name} absent, repli sur {alternate}")
         if path is None and spec in ("latest", "auto", ""):
             # Un téléchargement depuis Modal garde souvent seulement ckpt_best.pt.
             # Retomber dessus vaut infiniment mieux qu'un démarrage silencieux à zéro.
