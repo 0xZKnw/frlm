@@ -51,7 +51,11 @@ class Source:
 
 
 SOURCES: dict[str, Source] = {
-    "fineweb": Source("fineweb", "HuggingFaceFW/fineweb-2", "fra_Latn", "train", "text"),
+    # v4 (2026-08-21) : FineWeb2-HQ = top 10% de fineweb-2 fra_Latn sélectionné par
+    # classifieur de qualité (epfml). Même colonne "text". Le papier mesure : égale
+    # fineweb-2 complet avec 6× moins de tokens. data-v2 (déjà binarisé) n'est pas
+    # impacté ; l'ancien repo était HuggingFaceFW/fineweb-2.
+    "fineweb": Source("fineweb", "epfml/FineWeb2-HQ", "fra_Latn", "train", "text"),
     "wiki": Source("wiki", "wikimedia/wikipedia", "20231101.fr", "train", "text"),
     "chat": Source("chat", "angeluriot/french_instruct", None, "train", "chat"),
     "alpaca": Source("alpaca", "jpacifico/French-Alpaca-dataset-Instruct-110K", None, "train", "alpaca"),
@@ -68,6 +72,11 @@ SOURCES: dict[str, Source] = {
     "books": Source("books", "OpenLLM-France/Lucie-Training-Dataset", "Gutenberg-fr", "train", "book"),
     # Français oral spontané (transcriptions Claire) : naturel conversationnel.
     "oral": Source("oral", "OpenLLM-France/Lucie-Training-Dataset", "Claire-fr", "train", "oral"),
+    # ---- v4 : registres formels/structurés (Lucie) --------------------------------
+    # Thèses françaises : français académique long et soigné.
+    "theses": Source("theses", "OpenLLM-France/Lucie-Training-Dataset", "Theses", "train", "text"),
+    # Débats du Parlement européen : français oratoire structuré.
+    "europarl": Source("europarl", "OpenLLM-France/Lucie-Training-Dataset", "Europarl-fr", "train", "text"),
 }
 
 # Budgets de téléchargement (en caractères) des sources SFT hors mix de pré-entraînement.
@@ -86,10 +95,20 @@ DEFAULT_MIX = {"fineweb": 0.40, "wiki": 0.20, "chat": 0.15, "maths": 0.15,
                "books": 0.05, "oral": 0.05}
 V1_MIX = {"fineweb": 0.55, "wiki": 0.25, "chat": 0.20}  # l'ancienne recette, si besoin
 
+# Recette v4 (~3B tokens, tokenizer 24k) : qualité par token. Le web passe par
+# FineWeb2-HQ (déjà filtré), et les parts des petites sources finies sont calées
+# sur leur taille RÉELLE pour éviter le manque silencieux (chat ≈ 0,4B chars,
+# oral/europarl ≈ 0,1B chacun — à 13B chars de budget total, 3%/1%/1% les épuisent).
+V4_MIX = {"fineweb": 0.55, "wiki": 0.15, "maths": 0.15, "books": 0.06,
+          "theses": 0.04, "chat": 0.03, "europarl": 0.01, "oral": 0.01}
+
 # Recette du midtrain (recuit) : on refait une passe courte, dense en raisonnement,
 # sur laquelle tombe la décroissance du LR. C'est la recette moderne : les capacités
 # "chères" (maths, structure) sont sur-représentées pile quand le modèle grave.
-MID_MIX = {"maths": 0.45, "wiki": 0.20, "fineweb": 0.20, "books": 0.15}
+# v3 : petite tranche de distillat Kimi dans le recuit — exposer le format
+# <think> court + tour de parole naturel pile pendant que le modèle grave.
+# La tranche est minuscule (le fichier fait ~0,5M chars) mais placée au bon moment.
+MID_MIX = {"maths": 0.45, "wiki": 0.20, "fineweb": 0.15, "books": 0.15, "distill": 0.05}
 
 
 def render_chat(messages: list[dict]) -> str:
@@ -142,6 +161,13 @@ def _iter_source(src: Source, seed: int = 0):
     if src.config:
         kw["name"] = src.config
     ds = load_dataset(src.repo, **kw)
+    if src.kind in ("text", "book"):
+        # FineWeb2-HQ traîne une colonne embeddings (~2-3× le poids du texte) :
+        # la projeter AVANT le shuffle allège le téléchargement ET le buffer
+        try:
+            ds = ds.select_columns(["text"])
+        except Exception:
+            pass
     ds = ds.shuffle(seed=seed, buffer_size=10_000)
 
     for row in ds:
@@ -421,11 +447,29 @@ def encode_pretrain(tok, jsonl_paths: list[Path], out_dir: Path, val_frac: float
             "chars_per_token": round(n_chars / max(1, n_train + n_val), 3)}
 
 
+# Part visée du distillat dans le mix SFT. Le chargeur tire uniformément sur les
+# tokens : une petite source de haute qualité (quelques centaines de k-tokens face à
+# ~45M) serait invisible sans répétition. Le facteur est calculé d'après la taille
+# réelle des fichiers pour atteindre ~cette part, plafonné à 16× (au-delà on
+# mémoriserait les exemples au lieu d'en absorber le style).
+DISTILL_SHARE = 0.05
+
+
 def encode_sft(tok, jsonl_paths: list[Path], out_dir: Path, val_frac: float = 0.01,
-               max_len: int = 1024, min_val_tokens: int = 8192):
+               max_len: int = 1024, min_val_tokens: int = 8192,
+               repeats: dict[str, int] | None = None):
     """Tokenise les conversations avec un masque de loss (1 = réponse assistant)."""
     from tqdm import tqdm
 
+    if repeats is None:
+        repeats = {}
+        sizes = {p.stem: p.stat().st_size for p in jsonl_paths if p.exists()}
+        if "distill" in sizes:
+            autres = sum(v for k, v in sizes.items() if k != "distill")
+            reps = round(DISTILL_SHARE * autres / max(1, sizes["distill"]))
+            repeats["distill"] = int(min(16, max(1, reps)))
+            print(f"  [i] distill : ×{repeats['distill']} "
+                  f"(~{DISTILL_SHARE:.0%} du mix SFT visé)")
     eot = tok.token_to_id(EOT)
     train_w = BinWriter(out_dir / "sft_train.bin", with_mask=True)
     val_w = BinWriter(out_dir / "sft_val.bin", with_mask=True)
@@ -433,7 +477,9 @@ def encode_sft(tok, jsonl_paths: list[Path], out_dir: Path, val_frac: float = 0.
     n_conv, n_sup = 0, 0
 
     for p in jsonl_paths:
-        for rec in tqdm(iter_jsonl(p), desc=f"  sft {p.stem:14s}", unit="conv", ncols=90):
+        reps = max(1, repeats.get(p.stem, 1))
+        desc = f"  sft {p.stem:14s}" + (f" (×{reps})" if reps > 1 else "")
+        for rec in tqdm(iter_jsonl(p), desc=desc, unit="conv", ncols=90):
             msgs = rec.get("m")
             if not msgs:
                 continue
@@ -447,13 +493,19 @@ def encode_sft(tok, jsonl_paths: list[Path], out_dir: Path, val_frac: float = 0.
                 continue
             ids.append(eot)
             mask.append(0)
+            # train/val décidé AVANT répétition : un exemple va d'un seul côté,
+            # jamais des copies des deux (sinon la val est contaminée et flatte le score)
             to_val = val_w.n < min_val_tokens or rng.random() < val_frac
-            (val_w if to_val else train_w).write(ids, mask)
+            if to_val:
+                val_w.write(ids, mask)
+            else:
+                for _ in range(reps):
+                    train_w.write(ids, mask)
             n_conv += 1
             n_sup += sum(mask)
 
     out = {"conversations": n_conv, "train_tokens": train_w.n, "val_tokens": val_w.n,
-           "supervised_tokens": n_sup}
+           "supervised_tokens": n_sup, "repeats": {k: v for k, v in repeats.items() if v > 1}}
     train_w.close()
     val_w.close()
     return out
@@ -556,42 +608,113 @@ def prepare_all(data_dir: Path, target_tokens: int, vocab_size: int, mix: dict[s
 
     if mid_frac > 0:
         print(f"\n[4/{n_steps}] Corpus de midtrain (recuit dense en raisonnement)")
-        mid_budget = int(target_tokens * mid_frac * chars_per_token)
-        mid_paths, mid_caps = [], []
-        for name, w in MID_MIX.items():
-            budget_src = int(mid_budget * w)
-            if name == "maths":
-                # fournée fraîche : autre graine que le pretrain, donc problèmes inédits
-                p = raw_dir / "maths_mid.jsonl"
-                if not (skip_download and p.exists()):
-                    from frlm import synth
-                    synth.write_jsonl(p, budget_src, seed=seed + 101, mode="pretrain")
-            else:
-                p = raw_dir / f"{name}.jsonl"
-                if not p.exists():
-                    dl_mid = download_source(name, budget_src, p, seed=seed + 7)
-                    report.setdefault("download_mid", []).append(dl_mid)
-            mid_paths.append(p)
-            mid_caps.append(budget_src)
-        report["midtrain"] = encode_pretrain(tok, mid_paths, data_dir, prefix="mid_",
-                                             min_val_tokens=16384, char_caps=mid_caps)
+        build_mid(tok, data_dir, target_tokens, mid_frac, chars_per_token,
+                  skip_download=skip_download, seed=seed, report=report)
 
     if sft:
         print(f"\n[{n_steps}/{n_steps}] Sources de dialogue + raisonnement, binarisation avec masque de loss")
-        for name, budget in SFT_BUDGETS.items():
-            p = raw_dir / f"{name}.jsonl"
-            if name in mix:
-                continue                     # déjà téléchargé pour le pré-entraînement
-            if skip_download and p.exists():
-                print(f"  {name:9s} : déjà là ({p.stat().st_size/1e6:.0f} Mo), on garde")
-            else:
-                report.setdefault("download_sft", []).append(download_source(name, budget, p, seed=seed))
-        chat_paths = [raw_dir / f"{n}.jsonl"
-                      for n in ("chat", "alpaca", "reasoning", "gsm8k", "maths_sft")
-                      if (raw_dir / f"{n}.jsonl").exists()]
-        if not chat_paths:
-            print("  (aucune source de dialogue téléchargée — SFT ignoré)")
-        else:
-            report["sft"] = encode_sft(tok, chat_paths, data_dir, max_len=max_seq_len)
+        build_sft(tok, data_dir, mix, max_seq_len,
+                  skip_download=skip_download, seed=seed, report=report)
     (data_dir / "meta.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    return report
+
+
+def build_mid(tok, data_dir: Path, target_tokens: int, mid_frac: float,
+              chars_per_token: float = 3.6, skip_download: bool = False,
+              seed: int = 0, report: dict | None = None) -> dict:
+    """Construit mid_train.bin / mid_val.bin selon MID_MIX."""
+    report = report if report is not None else {}
+    raw_dir = Path(data_dir) / "raw"
+    mid_budget = int(target_tokens * mid_frac * chars_per_token)
+    mid_paths, mid_caps = [], []
+    for name, w in MID_MIX.items():
+        budget_src = int(mid_budget * w)
+        if name == "maths":
+            # fournée fraîche : autre graine que le pretrain, donc problèmes inédits
+            p = raw_dir / "maths_mid.jsonl"
+            if not (skip_download and p.exists()):
+                from frlm import synth
+                synth.write_jsonl(p, budget_src, seed=seed + 101, mode="pretrain")
+        elif name == "distill":
+            # le "t" du distillat n'a pas les balises ChatML : on le re-rend depuis
+            # "m" pour que le mid voie le MÊME format que le SFT et le chat
+            src_p = raw_dir / "distill.jsonl"
+            if not src_p.exists():
+                print("  distill  : absent — tranche ignorée au mid")
+                continue
+            p = raw_dir / "distill_mid.jsonl"
+            with p.open("w", encoding="utf-8") as f:
+                for rec in iter_jsonl(src_p):
+                    if rec.get("m"):
+                        f.write(json.dumps({"t": render_chat(rec["m"])},
+                                           ensure_ascii=False) + "\n")
+        else:
+            p = raw_dir / f"{name}.jsonl"
+            if not p.exists():
+                dl_mid = download_source(name, budget_src, p, seed=seed + 7)
+                report.setdefault("download_mid", []).append(dl_mid)
+        mid_paths.append(p)
+        mid_caps.append(budget_src)
+    report["midtrain"] = encode_pretrain(tok, mid_paths, Path(data_dir), prefix="mid_",
+                                         min_val_tokens=16384, char_caps=mid_caps)
+    return report
+
+
+def build_sft(tok, data_dir: Path, mix: dict[str, float] | None = None,
+              max_seq_len: int = 1024, skip_download: bool = False,
+              seed: int = 0, report: dict | None = None) -> dict:
+    """Télécharge (si besoin) les sources SFT et construit sft_train.bin / sft_val.bin."""
+    report = report if report is not None else {}
+    mix = mix or {}
+    raw_dir = Path(data_dir) / "raw"
+    for name, budget in SFT_BUDGETS.items():
+        p = raw_dir / f"{name}.jsonl"
+        if name in mix:
+            continue                     # déjà téléchargé pour le pré-entraînement
+        if skip_download and p.exists():
+            print(f"  {name:9s} : déjà là ({p.stat().st_size/1e6:.0f} Mo), on garde")
+        else:
+            report.setdefault("download_sft", []).append(download_source(name, budget, p, seed=seed))
+    chat_paths = [raw_dir / f"{n}.jsonl"
+                  for n in ("chat", "alpaca", "reasoning", "gsm8k", "maths_sft", "distill")
+                  if (raw_dir / f"{n}.jsonl").exists()]
+    if not chat_paths:
+        print("  (aucune source de dialogue téléchargée — SFT ignoré)")
+    else:
+        report["sft"] = encode_sft(tok, chat_paths, Path(data_dir), max_len=max_seq_len)
+    return report
+
+
+def rebin_mid_sft(data_dir: Path, mid_frac: float = 0.2, max_seq_len: int = 1024,
+                  seed: int = 0) -> dict:
+    """Re-binarise UNIQUEMENT mid + SFT avec le tokenizer EXISTANT.
+
+    À utiliser quand les recettes (MID_MIX, sur-échantillonnage, nouveau distill.jsonl)
+    changent après le pré-entraînement : réentraîner le tokenizer invaliderait le
+    checkpoint (les ids changeraient), ici on ne touche ni au tokenizer ni aux bins
+    du pretrain. target_tokens est relu depuis meta.json pour garder le même budget.
+    """
+    data_dir = Path(data_dir)
+    tok_path = data_dir / "tokenizer.json"
+    if not tok_path.exists():
+        raise SystemExit(f"[!] {tok_path} introuvable — lance d'abord un prepare complet.")
+    tok = load_tokenizer(tok_path)
+    meta = {}
+    meta_path = data_dir / "meta.json"
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    target_tokens = int(meta.get("target_tokens") or 300e6)
+    cpt = float((meta.get("pretrain") or {}).get("chars_per_token") or 3.6)
+
+    report: dict = {}
+    print(f"[1/2] Re-binarisation du midtrain (target {target_tokens/1e6:.0f}M tok, "
+          f"{cpt} c/tok, tokenizer conservé)")
+    build_mid(tok, data_dir, target_tokens, mid_frac, chars_per_token=cpt,
+              skip_download=True, seed=seed, report=report)
+    print("\n[2/2] Re-binarisation du SFT")
+    build_sft(tok, data_dir, mix=meta.get("mix"), max_seq_len=max_seq_len,
+              skip_download=True, seed=seed, report=report)
+
+    meta.update(report)
+    meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
     return report

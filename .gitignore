@@ -2,9 +2,16 @@
 # et `python run.py prepare` pour regenerer les corpus
 data/
 data-v2/
+# v4 : garder seulement les petits artefacts reproductibles explicitement suivis
+# (tokenizer, meta et pools RLAIF), jamais les corpus bruts locaux.
+data-v4/raw/
 runs/
 __pycache__/
 *.pt
 *.bin
 *.mask
 .cache/
+.env
+.env.*
+!.env.example
+*.pem

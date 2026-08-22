@@ -84,13 +84,21 @@ NIVEAUX = ("reformulé", "contexte", "concept")
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="Benchmark hors-distribution")
+    ap.add_argument("--run", default="fr-v2", help="nom du run (dossier dans runs/)")
+    ap.add_argument("--data-dir", default="data-v2")
+    ap.add_argument("--skip-hf", action="store_true", help="sans les concurrents HF")
+    a = ap.parse_args()
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    modeles = [NotreModele(ROOT / "runs" / "fr-v2", ROOT / "data-v2", device)]
-    for repo, nom in CONCURRENTS:
-        try:
-            modeles.append(ModeleHF(repo, nom, device))
-        except Exception as e:
-            print(f"[!] {repo} indisponible ({e}) — ignoré.")
+    modeles = [NotreModele(ROOT / "runs" / a.run, ROOT / a.data_dir, device)]
+    if not a.skip_hf:
+        for repo, nom in CONCURRENTS:
+            try:
+                modeles.append(ModeleHF(repo, nom, device))
+            except Exception as e:
+                print(f"[!] {repo} indisponible ({e}) — ignoré.")
 
     print(f"[i] OOD : {len(PROBLEMES)} problèmes inédits "
           f"({', '.join(f'{n} {sum(1 for x in PROBLEMES if x[0] == n)}' for n in NIVEAUX)}) "
@@ -132,7 +140,7 @@ def main():
             del m.model
             torch.cuda.empty_cache()
 
-    rap = ROOT / "bench" / "reports" / "bench_ood_report.md"
+    rap = ROOT / "bench" / "reports" / f"bench_ood_{a.run}.md"
     with rap.open("w", encoding="utf-8") as f:
         f.write("# Benchmark hors-distribution (problèmes 100% inédits)\n\n")
         f.write("| modèle | reformulé | contexte | concept | total | faits |\n")

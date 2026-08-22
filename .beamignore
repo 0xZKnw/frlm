@@ -1,0 +1,15 @@
+# exclusions de la synchro Beam : le code part dans le container, pas les données
+.git/
+__pycache__/
+**/__pycache__/
+data/
+data-v2/
+data-v4/
+runs/
+bench/reports/
+*.bin
+*.pt
+*.mask
+*.vhdx
+.venv/
+venv/

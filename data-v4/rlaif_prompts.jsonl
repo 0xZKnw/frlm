@@ -1,0 +1,153 @@
+{"type": "calc", "q": "Un café coûte 2 euros et un croissant 1 euro. Je prends 3 cafés et 2 croissants. Combien je paie ?", "ans": 8}
+{"type": "calc", "q": "J'ai 20 euros, je dépense 7 euros puis 5 euros. Combien me reste-t-il ?", "ans": 8}
+{"type": "calc", "q": "Il me faut 3 œufs par gâteau. J'ai 14 œufs. Combien de gâteaux complets puis-je faire ?", "ans": 4}
+{"type": "calc", "q": "Une place de cinéma coûte 9 euros. Nous sommes 4. Combien coûtent les places en tout ?", "ans": 36}
+{"type": "calc", "q": "Je lis 12 pages par jour pendant 5 jours. Combien de pages ai-je lues ?", "ans": 60}
+{"type": "calc", "q": "Un pack d'eau contient 6 bouteilles. J'achète 3 packs et je bois 2 bouteilles. Combien de bouteilles pleines me reste-t-il ?", "ans": 16}
+{"type": "calc", "q": "Une pizza est coupée en 8 parts. Nous sommes 3 et chacun mange 2 parts. Combien de parts restent ?", "ans": 2}
+{"type": "calc", "q": "J'achète un livre à 12 euros et je paie avec un billet de 20 euros. Combien me rend-on ?", "ans": 8}
+{"type": "calc", "q": "Un jardinier plante 4 rangées de 6 salades. Combien de salades en tout ?", "ans": 24}
+{"type": "calc", "q": "Il y a 24 élèves. La moitié fait du foot et 5 font du tennis. Combien ne font ni l'un ni l'autre ?", "ans": 7}
+{"type": "calc", "q": "Je gagne 11 euros de l'heure et je travaille 6 heures. Combien je gagne ?", "ans": 66}
+{"type": "calc", "q": "Un ascenseur supporte 300 kg. Trois personnes de 80 kg montent dedans. Combien de kilos de marge reste-t-il ?", "ans": 60}
+{"type": "calc", "q": "Une recette demande 250 g de farine. J'en fais le double. Combien de farine me faut-il, en grammes ?", "ans": 500}
+{"type": "calc", "q": "Cinq amis se partagent équitablement 35 euros. Combien reçoit chacun ?", "ans": 7}
+{"type": "calc", "q": "Mon téléphone est à 40 % de batterie et gagne 10 % toutes les 15 minutes en charge. À combien sera-t-il après 30 minutes ?", "ans": 60}
+{"type": "calc", "q": "Un film dure 2 heures et commence à 20 h. À quelle heure se termine-t-il ?", "ans": 22}
+{"type": "calc", "q": "J'économise 15 euros par mois pendant 4 mois. Combien ai-je économisé ?", "ans": 60}
+{"type": "calc", "q": "Le poulet coûte 8 euros le kilo. Combien coûtent 2 kilos ?", "ans": 16}
+{"type": "calc", "q": "On répartit 36 chaises également sur 4 tables. Combien de chaises par table ?", "ans": 9}
+{"type": "calc", "q": "Je cours 3 km le lundi, 5 km le mercredi et 4 km le vendredi. Combien de kilomètres dans la semaine ?", "ans": 12}
+{"type": "calc", "q": "Un cahier coûte 3 euros. Avec 17 euros, combien de cahiers entiers puis-je acheter ?", "ans": 5}
+{"type": "calc", "q": "Deux baguettes sont coupées chacune en 10 tranches. On en mange 14. Combien de tranches restent ?", "ans": 6}
+{"type": "calc", "q": "Un abonnement coûte 9 euros par mois. Combien cela fait-il par an ?", "ans": 108}
+{"type": "calc", "q": "Il pleut depuis 3 jours et la météo annonce encore 2 jours de pluie. Combien de jours de pluie en tout ?", "ans": 5}
+{"type": "calc", "q": "Paul a 3 fois l'âge de son fils, qui a 9 ans. Quel âge a Paul ?", "ans": 27}
+{"type": "calc", "q": "Une voiture consomme 6 litres aux 100 km. Combien de litres pour 300 km ?", "ans": 18}
+{"type": "calc", "q": "Le panier contient 5 pommes vertes et 7 pommes rouges. J'en mange 3. Combien de pommes restent ?", "ans": 9}
+{"type": "calc", "q": "Combien de minutes dans une heure et demie ?", "ans": 90}
+{"type": "calc", "q": "Un sac de 2 kg de riz coûte 4 euros. Combien coûte 1 kg ?", "ans": 2}
+{"type": "calc", "q": "Trois colis pèsent 2 kg, 3 kg et 4 kg. Quel est le poids total ?", "ans": 9}
+{"type": "calc", "q": "La piscine ouvre à 10 h et ferme à 18 h. Combien d'heures reste-t-elle ouverte ?", "ans": 8}
+{"type": "calc", "q": "J'invite 12 personnes, chacune mange 2 parts de tarte et une tarte fait 6 parts. Combien de tartes dois-je prévoir ?", "ans": 4}
+{"type": "calc", "q": "Mon forfait offre 100 Go d'internet. J'en ai utilisé 37. Combien de Go me reste-t-il ?", "ans": 63}
+{"type": "calc", "q": "Une équipe marque 2 buts par match pendant 7 matchs. Combien de buts en tout ?", "ans": 14}
+{"type": "calc", "q": "Je fais 2 séries de 15 pompes le matin et une série de 20 le soir. Combien de pompes dans la journée ?", "ans": 50}
+{"type": "calc", "q": "Un ticket de métro coûte 2 euros. J'en prends un le matin et un le soir pendant 5 jours. Combien je dépense ?", "ans": 20}
+{"type": "calc", "q": "Un yaourt seul coûte 1 euro, le pack de 4 coûte 3 euros. J'achète 2 packs. Combien je paie ?", "ans": 6}
+{"type": "calc", "q": "Nous sommes 6 au restaurant, l'addition est de 90 euros et on partage également. Combien paie chacun ?", "ans": 15}
+{"type": "calc", "q": "Je dors de 23 h à 7 h. Combien d'heures de sommeil ?", "ans": 8}
+{"type": "calc", "q": "Combien d'œufs dans 3 douzaines ?", "ans": 36}
+{"type": "calc", "q": "Mon salaire est de 1500 euros et mon loyer de 500 euros. Combien me reste-t-il après le loyer ?", "ans": 1000}
+{"type": "calc", "q": "Une imprimante sort 12 pages par minute. Combien de pages en 5 minutes ?", "ans": 60}
+{"type": "calc", "q": "J'épluche 2 carottes par minute. Combien de minutes pour 10 carottes ?", "ans": 5}
+{"type": "calc", "q": "Le magasin fait moins 50 % sur un pull à 40 euros. Quel est le prix soldé ?", "ans": 20}
+{"type": "calc", "q": "Il reste 3 semaines avant les vacances. Combien de jours ?", "ans": 21}
+{"type": "calc", "q": "Un match dure 90 minutes plus 5 minutes d'arrêts de jeu. Quelle durée totale ?", "ans": 95}
+{"type": "calc", "q": "J'ai 3 billets de 10 euros et 4 pièces de 2 euros. Combien d'argent en tout ?", "ans": 38}
+{"type": "calc", "q": "Un escargot avance de 5 cm par minute. Quelle distance en 4 minutes, en cm ?", "ans": 20}
+{"type": "calc", "q": "La classe compte 28 élèves dont 13 filles. Combien de garçons ?", "ans": 15}
+{"type": "calc", "q": "Chaque étagère porte 9 livres. J'ai 4 étagères pleines et 3 livres posés à côté. Combien de livres en tout ?", "ans": 39}
+{"type": "calc", "q": "Le taxi coûte 5 euros de prise en charge plus 2 euros par kilomètre. Combien coûte une course de 6 km ?", "ans": 17}
+{"type": "calc", "q": "Ma plante a besoin d'eau tous les 3 jours. Sur 12 jours, combien de fois vais-je l'arroser ?", "ans": 4, "note": "arrosages aux jours 3, 6, 9, 12"}
+{"type": "piege", "q": "Mon chat dort sur le canapé. Combien pèse-t-il ?"}
+{"type": "piege", "q": "J'ai acheté trois tomates au marché. Quel est le prénom du marchand ?"}
+{"type": "piege", "q": "Le bus numéro 12 passe toutes les 10 minutes. De quelle couleur est le bus ?"}
+{"type": "piege", "q": "Léa porte un manteau bleu. Quelle est sa pointure ?"}
+{"type": "piege", "q": "Il y a 5 chaises autour de la table. Combien coûte la table ?"}
+{"type": "piege", "q": "Je pars en vacances samedi. Combien de valises vais-je emporter ?"}
+{"type": "piege", "q": "Mon immeuble a 6 étages. Combien de personnes y habitent ?"}
+{"type": "piege", "q": "La boulangerie ouvre à 7 h. Combien de clients viendront demain ?"}
+{"type": "piege", "q": "Sophie a deux frères. Quel âge a sa mère ?"}
+{"type": "piege", "q": "Le film commence à 21 h. Combien de spectateurs seront dans la salle ?"}
+{"type": "piege", "q": "J'ai 10 euros en poche. Combien d'argent a mon voisin ?"}
+{"type": "piege", "q": "Une voiture roule sur l'autoroute. Combien de kilomètres lui reste-t-il à faire ?"}
+{"type": "piege", "q": "Max a un vélo vert. Combien de vitesses a ce vélo ?"}
+{"type": "piege", "q": "Nous avons mangé une pizza hier soir. Combien coûtait-elle ?"}
+{"type": "piege", "q": "Le jardin fait 200 mètres carrés. Combien d'arbres y poussent ?"}
+{"type": "piege", "q": "Ma tante arrive par le train de 15 h. Dans quel wagon est-elle assise ?"}
+{"type": "piege", "q": "L'école compte 12 classes. Combien de professeurs portent des lunettes ?"}
+{"type": "piege", "q": "J'écoute une chanson qui dure 3 minutes. En quelle année est-elle sortie ?"}
+{"type": "piege", "q": "Le magasin vend des chaussures. Combien de paires a-t-il vendues lundi ?"}
+{"type": "piege", "q": "Un avion décolle de Lyon. Combien de passagers sont à bord ?"}
+{"type": "piege", "q": "La soupe est encore chaude. Quelle est sa température exacte ?"}
+{"type": "piege", "q": "Marc a rendez-vous chez le dentiste. Combien de caries a-t-il ?"}
+{"type": "piege", "q": "Il y a du vent aujourd'hui. À quelle vitesse souffle-t-il ?"}
+{"type": "piege", "q": "Emma a planté des graines dimanche. Combien de fleurs vont pousser ?"}
+{"type": "piege", "q": "Mon ordinateur a 3 ans. Combien de fichiers contient-il ?"}
+{"type": "piege", "q": "Le facteur passe le matin. Combien de lettres apportera-t-il demain ?"}
+{"type": "piege", "q": "J'ai deux sœurs et un frère. Quel est le métier de mon père ?"}
+{"type": "piege", "q": "Le restaurant propose 20 plats. Lequel vais-je préférer ?"}
+{"type": "piege", "q": "Une bougie brûle dans le salon. Depuis combien de temps est-elle allumée ?"}
+{"type": "piege", "q": "Pierre lit un roman de 300 pages. Le trouve-t-il intéressant ?"}
+{"type": "fait", "q": "Quelle est la capitale de l'Italie ?", "attendu": "\\bRome\\b"}
+{"type": "fait", "q": "Quelle est la capitale de l'Espagne ?", "attendu": "\\bMadrid\\b"}
+{"type": "fait", "q": "Combien y a-t-il de jours dans une semaine ?", "attendu": "\\b7\\b|\\bsept\\b"}
+{"type": "fait", "q": "Combien y a-t-il de minutes dans une heure ?", "attendu": "\\b60\\b|soixante"}
+{"type": "fait", "q": "De quelle couleur est le ciel par beau temps ?", "attendu": "\\bbleu"}
+{"type": "fait", "q": "Quel animal fait « miaou » ?", "attendu": "\\bchat"}
+{"type": "fait", "q": "Combien de pattes a une araignée ?", "attendu": "\\b8\\b|\\bhuit\\b"}
+{"type": "fait", "q": "Quelle langue parle-t-on à Paris ?", "attendu": "français"}
+{"type": "fait", "q": "Quel est le premier jour de la semaine en France ?", "attendu": "\\blundi\\b"}
+{"type": "fait", "q": "Combien y a-t-il de mois dans une année ?", "attendu": "\\b12\\b|\\bdouze\\b"}
+{"type": "fait", "q": "À quelle température l'eau gèle-t-elle, en degrés Celsius ?", "attendu": "\\b0\\b|zéro"}
+{"type": "fait", "q": "Sur quelle planète vivons-nous ?", "attendu": "[Tt]erre"}
+{"type": "fait", "q": "Qui a écrit « Le Petit Prince » ?", "attendu": "Saint-Exupéry|Exupéry"}
+{"type": "fait", "q": "Quel est le contraire de « grand » ?", "attendu": "\\bpetit"}
+{"type": "fait", "q": "Combien y a-t-il de saisons dans l'année ?", "attendu": "\\b4\\b|\\bquatre\\b"}
+{"type": "fait", "q": "Quelle mer borde Marseille ?", "attendu": "Méditerranée"}
+{"type": "fait", "q": "Avec quel fruit fait-on le jus d'orange ?", "attendu": "orange"}
+{"type": "fait", "q": "Combien de doigts a une main ?", "attendu": "\\b5\\b|\\bcinq\\b"}
+{"type": "fait", "q": "Quelle monnaie utilise-t-on en France ?", "attendu": "\\beuro"}
+{"type": "fait", "q": "Quel animal est appelé le meilleur ami de l'homme ?", "attendu": "\\bchien"}
+{"type": "fait", "q": "De quelle couleur est la neige ?", "attendu": "blanc"}
+{"type": "fait", "q": "Combien de lettres compte l'alphabet français ?", "attendu": "\\b26\\b|vingt-six"}
+{"type": "fait", "q": "Quelle boisson chaude est faite avec des grains torréfiés ?", "attendu": "\\bcafé\\b"}
+{"type": "fait", "q": "Quel est le plus grand océan du monde ?", "attendu": "Pacifique"}
+{"type": "fait", "q": "Dans quel pays se trouve la tour Eiffel ?", "attendu": "France"}
+{"type": "chat", "q": "Salut, qui es-tu ?", "note": "attendu : se présente comme frlm, assistant en français, court et propre"}
+{"type": "chat", "q": "Bonjour ! Tu vas bien ?", "note": "salutation naturelle, pas de calcul"}
+{"type": "chat", "q": "Merci beaucoup pour ton aide !", "note": "réponse de politesse simple"}
+{"type": "chat", "q": "Qu'est-ce que tu sais faire ?", "note": "décrit ses capacités sans inventer (pas d'accès internet, etc.)"}
+{"type": "chat", "q": "Comment tu t'appelles ?", "note": "attendu : frlm"}
+{"type": "chat", "q": "Tu peux m'aider à préparer une liste de courses pour la semaine ?", "note": "liste plausible, français propre"}
+{"type": "chat", "q": "Donne-moi une idée de repas simple pour ce soir.", "note": "proposition concrète et cohérente"}
+{"type": "chat", "q": "Raconte-moi une histoire très courte sur un chat.", "note": "2-4 phrases cohérentes, pas de radotage"}
+{"type": "chat", "q": "Explique-moi ce qu'est une addition, simplement.", "note": "explication pédagogique correcte"}
+{"type": "chat", "q": "Je suis fatigué aujourd'hui.", "note": "réponse empathique simple, pas de calcul"}
+{"type": "chat", "q": "Au revoir !", "note": "prend congé naturellement"}
+{"type": "chat", "q": "Tu parles quelles langues ?", "note": "honnête : le français"}
+{"type": "chat", "q": "Écris une phrase avec le mot « soleil ».", "note": "une phrase correcte contenant « soleil »"}
+{"type": "chat", "q": "Donne-moi trois prénoms français.", "note": "exactement trois prénoms plausibles"}
+{"type": "chat", "q": "Quelle est la différence entre un fruit et un légume ?", "note": "explication simple sans absurdités"}
+{"type": "chat", "q": "Conseille-moi un moment de la journée pour faire du sport.", "note": "conseil cohérent, justification simple"}
+{"type": "chat", "q": "Explique-moi pourquoi il faut boire de l'eau.", "note": "raisons plausibles, pas d'inventions farfelues"}
+{"type": "chat", "q": "Écris un petit message d'anniversaire pour mon ami Karim.", "note": "message chaleureux mentionnant Karim"}
+{"type": "chat", "q": "Résume en une phrase : « Le chat dort sur le canapé pendant que la pluie tombe dehors. »", "note": "résumé fidèle en une phrase, pas d'ajouts"}
+{"type": "chat", "q": "Propose-moi un titre pour une histoire de pirates.", "note": "titre court en rapport"}
+{"type": "chat", "q": "Qu'est-ce qu'un verbe ? Donne un exemple.", "note": "définition correcte + exemple qui est bien un verbe"}
+{"type": "chat", "q": "Dis-moi quelque chose d'intéressant sur les abeilles.", "note": "fait plausible sur les abeilles, pas inventé de toutes pièces"}
+{"type": "chat", "q": "J'apprends le français. Corrige ma phrase : « je aller au marché hier ».", "note": "correction du type « je suis allé au marché hier »"}
+{"type": "chat", "q": "Tu es un humain ?", "note": "honnête : non, modèle/programme"}
+{"type": "chat", "q": "Aide-moi à choisir : vélo ou marche pour aller au travail à 2 km ?", "note": "compare raisonnablement, l'un ou l'autre défendable"}
+{"type": "chat", "q": "Fais une liste de 3 choses à emporter à la plage.", "note": "exactement 3 objets plausibles"}
+{"type": "chat", "q": "Explique la différence entre le matin et l'après-midi.", "note": "explication simple correcte"}
+{"type": "chat", "q": "C'est quoi ton plat préféré ?", "note": "réponse honnête d'IA (ne mange pas) ou pirouette légère, pas d'invention lourde"}
+{"type": "consigne", "q": "Combien font 6 + 7 ? Donne uniquement le nombre.", "ans": 13, "check": "nombre_seul"}
+{"type": "consigne", "q": "Combien font 9 × 3 ? Donne uniquement le nombre.", "ans": 27, "check": "nombre_seul"}
+{"type": "consigne", "q": "Combien font 50 − 18 ? Donne uniquement le nombre.", "ans": 32, "check": "nombre_seul"}
+{"type": "consigne", "q": "Combien font 8 × 5 ? Donne uniquement le nombre.", "ans": 40, "check": "nombre_seul"}
+{"type": "consigne", "q": "Combien font 14 + 9 ? Donne uniquement le nombre.", "ans": 23, "check": "nombre_seul"}
+{"type": "consigne", "q": "Combien font 5 × 5 ? Donne uniquement le nombre.", "ans": 25, "check": "nombre_seul"}
+{"type": "consigne", "q": "Combien font 60 ÷ 6 ? Donne uniquement le nombre.", "ans": 10, "check": "nombre_seul"}
+{"type": "consigne", "q": "15 est-il plus grand que 12 ? Réponds par oui ou non.", "ans": "oui", "check": "oui_non"}
+{"type": "consigne", "q": "4 est-il un nombre pair ? Réponds par oui ou non.", "ans": "oui", "check": "oui_non"}
+{"type": "consigne", "q": "7 + 7 font-ils 15 ? Réponds par oui ou non.", "ans": "non", "check": "oui_non"}
+{"type": "consigne", "q": "Le mot « maison » est-il un nom ? Réponds par oui ou non.", "ans": "oui", "check": "oui_non"}
+{"type": "consigne", "q": "20 est-il plus petit que 10 ? Réponds par oui ou non.", "ans": "non", "check": "oui_non"}
+{"type": "consigne", "q": "Quelle est la capitale de la Belgique ? Réponds en un seul mot.", "ans": "Bruxelles", "check": "un_mot"}
+{"type": "consigne", "q": "Quel animal aboie ? Réponds en un seul mot.", "ans": "chien", "check": "un_mot"}
+{"type": "consigne", "q": "Quelle couleur obtient-on en mélangeant le bleu et le jaune ? Réponds en un seul mot.", "ans": "vert", "check": "un_mot"}
+{"type": "consigne", "q": "Quel mois vient après janvier ? Réponds en un seul mot.", "ans": "février", "check": "un_mot"}
+{"type": "consigne", "q": "Combien font 100 ÷ 4 ? Réponds en 8 mots maximum.", "ans": 25, "check": "max_mots"}
+{"type": "consigne", "q": "Combien font 30 − 12 ? Réponds en 8 mots maximum.", "ans": 18, "check": "max_mots"}

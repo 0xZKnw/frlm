@@ -119,29 +119,39 @@ def lire_texte_eval(data_dir: Path, n_chars: int) -> str:
 # Notre modèle
 # --------------------------------------------------------------------------------------
 class NotreModele:
-    def __init__(self, run_dir: Path, data_dir: Path, device: str):
+    def __init__(self, run_dir: Path, data_dir: Path, device: str,
+                 stage=None, ckpt_name=None):
         ckpt = None
-        for phase in ("sft", "mid", "pretrain"):
-            for name in ("ckpt_best.pt", "ckpt_latest.pt"):
+        # stage/ckpt_name explicites : on NE retombe PAS sur sft en cas d'absence
+        # (un repli silencieux produirait un rapport étiqueté rlaif mais mesuré
+        # sur le SFT — vécu de justesse le 2026-08-22).
+        phases = (stage,) if stage else ("sft", "mid", "pretrain")
+        noms = (ckpt_name,) if ckpt_name else ("ckpt_best.pt", "ckpt_latest.pt")
+        for phase in phases:
+            for name in noms:
                 p = run_dir / phase / name
                 if p.exists():
                     ckpt = p
                     break
             if ckpt:
                 break
-        assert ckpt, f"aucun checkpoint sous {run_dir}"
+        assert ckpt, (f"aucun checkpoint sous {run_dir}"
+                      + (f" / {stage}" if stage else "")
+                      + (f" / {ckpt_name}" if ckpt_name else ""))
         ck = torch.load(ckpt, map_location=device, weights_only=False)
-        champs = {f.name for f in dataclasses.fields(ModelConfig)}
-        mcfg = ModelConfig(**{k: v for k, v in ck["model_cfg"].items() if k in champs})
-        self.model = build_model(mcfg).to(device)
+        from frlm import config_from_dict, model_from_cfg
+        mcfg = config_from_dict(ck["model_cfg"])
+        self.model = model_from_cfg(mcfg).to(device)
         self.model.load_state_dict(ck["model"])
         self.model.eval()
         self.tok = D.load_tokenizer(data_dir / "tokenizer.json")
         self.sp = D.special_ids(self.tok)
         self.device = device
         self.phase = ckpt.parent.name
-        self.nom = f"fr-v2 · 58M ({self.phase}, step {ck.get('step', '?')})"
-        print(f"[i] fr-v2 chargé : {ckpt}  (phase {self.phase})")
+        n_par = sum(p.numel() for p in self.model.parameters())
+        self.nom = (f"{run_dir.name} · {n_par / 1e6:.0f}M "
+                    f"({self.phase}, step {ck.get('step', '?')})")
+        print(f"[i] {run_dir.name} chargé : {ckpt}  (phase {self.phase})")
 
     @torch.no_grad()
     def bpb(self, texte: str) -> float:

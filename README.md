@@ -7,6 +7,12 @@ frlm speaks French, works through problems in a `<think>…</think>` scratchpad 
 answering, and beats the public French GPT-2s at 124M (2× its size) on both language
 quality **and** arithmetic — for ~8 hours of gaming-GPU time total.
 
+> **v4 experimental release (August 2026).** The repository now also contains the
+> 229M-parameter `v4-base` speedrun architecture, a 24k digit-split tokenizer, a
+> 3B-token data recipe, filtered distillation, improved GRPO, file-mediated RLAIF,
+> secret-family OOD benchmarks, and Modal/Beam runners. The original 58M model and
+> results documented below remain the stable published baseline.
+
 ```
 you   › Léa a 15 pommes. Elle en mange 7 et en récupère 3. Combien de pommes a-t-elle ?
 model › <think>
@@ -20,6 +26,48 @@ model › <think>
 **Qwen3.5-style** architecture (2026), **Muon** optimizer, **WSD** schedule, custom
 digit-split BPE tokenizer, full 3-stage pipeline (pretrain → midtrain → SFT), a live
 stats dashboard, and a chat mode to poke the model without stopping training.
+
+---
+
+## v4 (experimental)
+
+v4 is a larger research iteration focused on learning efficiency and post-training,
+not a replacement claim for the carefully audited v1 result. Its main additions are:
+
+- `model_v3.py`: Canon layers, value embeddings, U-net skips, ReLU² MLPs,
+  3:1 sliding/global attention, logit softcap, and v3/v4 presets;
+- a 3B-token French recipe with a 24,576-token digit-split tokenizer and new
+  synthetic families for time, fractions, money, inverse problems, and packing;
+- sequence-level distillation, DAPO/Dr. GRPO refinements, verifiable instructions,
+  and an RLAIF stage with anti-rambling probes;
+- `bench_ood_v2.py`, whose secret problem families are kept out of training, plus
+  reports for pretrain, SFT, and RLAIF checkpoints;
+- reproducible GPU throughput runners for local CUDA, Modal, and Beam.
+
+The latest checked-in report for the RLAIF2 checkpoint scores **4/40** on the
+strict secret-family OOD benchmark and **9/12** elementary facts. These modest
+numbers are published intentionally: v4 is an experiment with useful infrastructure
+and documented failure modes, not a benchmark victory. See
+[`bench/reports/bench_ood_v2_fr-v4_rlaif2_latest.md`](bench/reports/bench_ood_v2_fr-v4_rlaif2_latest.md).
+
+The Git repository includes the v4 code, tokenizer, data metadata, RLAIF prompt
+pools, and benchmark reports. It deliberately excludes raw corpora, tokenized
+binaries, masks, run logs, judge exchanges, optimizer states, and multi-gigabyte
+checkpoints. Regenerate data with `python run.py prepare`, or use your own compatible
+checkpoint under `runs/<name>/<phase>/ckpt_latest.pt`.
+
+Example v4 commands:
+
+```bash
+python run.py prepare --data-dir data-v4 --target-tokens 3e9 --vocab-size 24576 --seq-len 2048 \
+  --mix "fineweb:0.55,wiki:0.15,maths:0.15,books:0.06,theses:0.04,chat:0.03,europarl:0.01,oral:0.01"
+python run.py train --data-dir data-v4 --run fr-v4 --preset v4-base --seq-len 2048
+python run.py mid --data-dir data-v4 --run fr-v4 --preset v4-base --seq-len 2048
+python run.py sft --data-dir data-v4 --run fr-v4 --preset v4-base --seq-len 2048
+python run.py rl --run fr-v4
+python run.py rlaif --run fr-v4
+python bench/bench_ood_v2.py --run fr-v4 --data-dir data-v4 --hf none
+```
 
 ---
 

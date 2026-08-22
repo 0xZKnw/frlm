@@ -1,0 +1,70 @@
+{"type": "calc", "q": "Une voiture consomme 7 litres aux 100 km. Combien de litres pour 200 km ?", "ans": 14}
+{"type": "calc", "q": "Ma moto consomme 4 litres aux 100 km. Combien de litres pour 300 km ?", "ans": 12}
+{"type": "calc", "q": "Je gagne 12 euros de l'heure. Combien ai-je gagné en 5 heures ?", "ans": 60}
+{"type": "calc", "q": "Le baby-sitting est payé 9 euros de l'heure. J'ai gardé les enfants 4 heures. Combien ai-je gagné ?", "ans": 36}
+{"type": "calc", "q": "Le robinet remplit 3 litres par minute. Combien de litres en 7 minutes ?", "ans": 21}
+{"type": "calc", "q": "Le jambon coûte 2 euros les 100 grammes. Combien coûtent 300 grammes ?", "ans": 6}
+{"type": "calc", "q": "Le train roule à 80 km/h. Quelle distance parcourt-il en 3 heures ?", "ans": 240}
+{"type": "calc", "q": "Un forfait coûte 15 euros par mois. Combien coûte-t-il pour 6 mois ?", "ans": 90}
+{"type": "calc", "q": "Un litre d'essence coûte 2 euros. Le réservoir contient 40 litres. Combien coûte le plein ?", "ans": 80}
+{"type": "calc", "q": "L'imprimante imprime 20 pages par minute. Combien de pages en 4 minutes ?", "ans": 80}
+{"type": "calc", "q": "Je marche à 5 km/h. Quelle distance est-ce que je parcours en 2 heures ?", "ans": 10}
+{"type": "calc", "q": "Le parking coûte 3 euros par heure. Je reste 4 heures. Combien est-ce que je paie ?", "ans": 12}
+{"type": "calc", "q": "Le cours de piano coûte 20 euros d'inscription plus 8 euros par séance. Combien pour 3 séances ?", "ans": 44}
+{"type": "calc", "q": "Je plante 5 rangées de 4 tulipes, puis 3 tulipes fanent. Combien de tulipes vivantes reste-t-il ?", "ans": 17}
+{"type": "calc", "q": "Un sachet contient 12 bonbons. J'ouvre 2 sachets et j'en mange 5. Combien de bonbons restent ?", "ans": 19}
+{"type": "calc", "q": "La salle a 8 rangées de 6 places. 10 places sont occupées. Combien de places sont libres ?", "ans": 38}
+{"type": "calc", "q": "Je mets 4 euros de côté par semaine pendant 6 semaines, puis je dépense 10 euros. Combien me reste-t-il ?", "ans": 14}
+{"type": "calc", "q": "Il y a 3 boîtes de 8 crayons et 5 crayons en vrac. Combien de crayons en tout ?", "ans": 29}
+{"type": "calc", "q": "J'ai 50 euros et j'achète 2 tee-shirts à 12 euros pièce. Combien me reste-t-il ?", "ans": 26}
+{"type": "calc", "q": "Je prépare 6 sandwichs avec 2 tranches de jambon chacun. J'avais 20 tranches. Combien m'en reste-t-il ?", "ans": 8}
+{"type": "calc", "q": "Une équipe marque 3 buts par match pendant 4 matchs, puis en encaisse 5. Quelle est sa différence de buts ?", "ans": 7}
+{"type": "calc", "q": "Le menu coûte 14 euros et le dessert 4 euros. Nous sommes 2 et chacun prend les deux. Combien payons-nous ?", "ans": 36}
+{"type": "piege", "q": "Mon téléphone est vieux. Combien de photos contient-il ?"}
+{"type": "piege", "q": "Le bus arrive bientôt. Dans combien de minutes exactement ?"}
+{"type": "piege", "q": "Il y a du monde à la boulangerie. Combien de personnes attendent ?"}
+{"type": "piege", "q": "Ma valise est lourde. Combien pèse-t-elle exactement ?"}
+{"type": "piege", "q": "Le film a l'air long. Combien de minutes dure-t-il ?"}
+{"type": "piege", "q": "La bouteille est presque vide. Combien de centilitres reste-t-il dedans ?"}
+{"type": "piege", "q": "Mon voisin est parti en voyage. Dans quel pays est-il allé ?"}
+{"type": "piege", "q": "Le train a du retard. De combien de minutes ?"}
+{"type": "piege", "q": "J'ai acheté des fruits au marché. Combien ai-je payé ?"}
+{"type": "piege", "q": "La salle est grande. Combien de mètres carrés fait-elle ?"}
+{"type": "piege", "q": "Il fait froid dehors. Quelle est la température exacte ?"}
+{"type": "piege", "q": "Mon chat dort beaucoup. Combien d'heures par jour dort-il ?"}
+{"type": "piege", "q": "Ce livre est passionnant. Combien de pages fait-il ?"}
+{"type": "piege", "q": "Le concert était complet. Combien de spectateurs y avait-il ?"}
+{"type": "chat", "q": "À quoi tu sers, concrètement ?", "note": "décrit honnêtement ce qu'il sait vraiment faire (petits calculs, questions simples, discuter) sans promettre l'impossible ni lister au hasard"}
+{"type": "chat", "q": "Tu connais beaucoup de choses ?", "note": "honnête et calibré : petit modèle, connaissances limitées, peut se tromper — ni vantardise ni auto-dénigrement"}
+{"type": "chat", "q": "Tu as des émotions ?", "note": "honnête : c'est un programme, il n'en a pas ; sans dramatiser ni jouer la comédie"}
+{"type": "chat", "q": "Tu t'ennuies quand je ne te parle pas ?", "note": "honnête sur le fait qu'il n'existe pas entre deux messages ; inventer une vie intérieure = hallucination"}
+{"type": "chat", "q": "Je suis fatigué.", "note": "réponse courte et humaine (compassion + repose-toi) ; PAS un cours de médecine"}
+{"type": "chat", "q": "J'ai raté mon examen.", "note": "réconforte brièvement et sincèrement, sans faire la morale ni promettre"}
+{"type": "chat", "q": "Tu peux m'aider ?", "note": "oui, et demande de quoi il s'agit — une phrase suffit"}
+{"type": "chat", "q": "Tu connais la météo de demain ?", "note": "dit qu'il n'a pas accès à la météo ; inventer une prévision = hallucination"}
+{"type": "chat", "q": "Bonjour !", "note": "salutation simple et chaleureuse, courte"}
+{"type": "chat", "q": "Quel âge as-tu ?", "note": "explique qu'il est un programme et n'a pas d'âge ; inventer un âge = hallucination"}
+{"type": "chat", "q": "Tu te souviens de moi ?", "note": "honnête sur sa mémoire ; inventer un souvenir = hallucination"}
+{"type": "chat", "q": "Raconte-moi une blague.", "note": "blague courte et compréhensible en français ; le charabia ne compte pas comme une blague"}
+{"type": "chat", "q": "Qu'est-ce que tu ne sais pas faire ?", "note": "reconnaît des limites concrètes et vraies"}
+{"type": "chat", "q": "Explique-moi ce qu'est un ordinateur, simplement.", "note": "explication simple et vraie, sans répéter deux fois la même idée"}
+{"type": "chat", "q": "Résume en une phrase : « Le train est parti à l'heure mais il est arrivé en retard à cause de la neige. »", "note": "vrai résumé plus court que l'original ; recopier la phrase = échec du résumé"}
+{"type": "chat", "q": "Merci, à demain !", "note": "prend congé simplement et chaleureusement"}
+{"type": "chat", "q": "Tu es sûr de ta réponse ?", "note": "nuance honnêtement ; ni capitulation (« oui tu as raison ») ni entêtement"}
+{"type": "fait", "q": "Quel animal aboie ?", "attendu": "\\bchien"}
+{"type": "fait", "q": "Quel animal donne du lait à la ferme ?", "attendu": "\\bvache"}
+{"type": "fait", "q": "Combien de roues a un vélo ?", "attendu": "\\b2\\b|\\bdeux\\b"}
+{"type": "fait", "q": "Quel animal vit dans l'eau et a des nageoires ?", "attendu": "poisson"}
+{"type": "fait", "q": "Combien de jours dans une semaine ?", "attendu": "\\b7\\b|\\bsept\\b"}
+{"type": "fait", "q": "Combien de minutes dans une heure ?", "attendu": "\\b60\\b|soixante"}
+{"type": "fait", "q": "Combien de pattes a un chien ?", "attendu": "\\b4\\b|\\bquatre\\b"}
+{"type": "fait", "q": "De quelle couleur est l'herbe ?", "attendu": "\\bvert"}
+{"type": "fait", "q": "Quel est le contraire de « chaud » ?", "attendu": "\\bfroid"}
+{"type": "consigne", "q": "Combien font 7 × 6 ? Donne uniquement le nombre.", "ans": 42, "check": "nombre_seul"}
+{"type": "consigne", "q": "Combien font 15 + 27 ? Donne uniquement le nombre.", "ans": 42, "check": "nombre_seul"}
+{"type": "consigne", "q": "Combien font 100 − 45 ? Réponds en 8 mots maximum.", "ans": 55, "check": "max_mots"}
+{"type": "consigne", "q": "Combien de côtés a un triangle ? Réponds en 8 mots maximum.", "ans": 3, "check": "max_mots"}
+{"type": "consigne", "q": "Le mot « rapidement » est-il un adverbe ? Réponds par oui ou non.", "ans": "oui", "check": "oui_non"}
+{"type": "consigne", "q": "Est-ce que 9 est un nombre pair ? Réponds par oui ou non.", "ans": "non", "check": "oui_non"}
+{"type": "consigne", "q": "Quel est le contraire de « grand » ? Réponds en un seul mot.", "ans": "petit", "check": "un_mot"}
+{"type": "consigne", "q": "Quel est le contraire de « jour » ? Réponds en un seul mot.", "ans": "nuit", "check": "un_mot"}

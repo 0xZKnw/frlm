@@ -17,6 +17,7 @@ en était (step, optimiseur, RNG, ordre des batchs).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -32,7 +33,9 @@ import numpy as np
 import torch
 
 from frlm import data as D
+from frlm import config_from_dict, model_from_cfg
 from frlm.model import PRESETS, ModelConfig, build_model
+from frlm.model_v3 import PRESETS_V3, ModelConfigV3
 from frlm.optim import build_optimizers, lr_multiplier
 
 ROOT = Path(__file__).resolve().parent
@@ -245,15 +248,19 @@ class Trainer:
         self.val_data = D.BinCorpus(val_bin, cfg.seq_len, with_mask=masked)
 
         # ---- modèle ------------------------------------------------------------------
-        mcfg = ModelConfig(**PRESETS[cfg.preset])
-        mcfg.hybrid = cfg.hybrid
+        # le nom du preset choisit l'architecture : "v3-*" -> model_v3 (speedrun)
+        if cfg.preset in PRESETS_V3:
+            mcfg = ModelConfigV3(**PRESETS_V3[cfg.preset])
+        else:
+            mcfg = ModelConfig(**PRESETS[cfg.preset])
+            mcfg.hybrid = cfg.hybrid
         mcfg.vocab_size = self.tok.get_vocab_size()
         mcfg.max_seq_len = max(mcfg.max_seq_len, cfg.seq_len)
         mcfg.eos_id = self.sp["eot"]
         mcfg.bos_id = self.sp["eot"]
         self.mcfg = mcfg
 
-        self.model = build_model(mcfg).to(self.device)
+        self.model = model_from_cfg(mcfg).to(self.device)
         self.raw_model = self.model
         self.opts, self.opt_info = build_optimizers(self.model, cfg)
 
@@ -418,7 +425,7 @@ class Trainer:
             f"{human(self.opt_info['adam_params'])} via AdamW) · schedule {cfg.schedule}\n"
             f"corpus : {human(len(self.train_data))} tokens train / {human(len(self.val_data))} val\n"
             f"cible  : {cfg.max_steps} steps = {human(cfg.max_steps*tps_step)} tokens "
-            f"({cfg.max_steps*tps_step/max(1,n_params):.1f} tokens/param)",
+            f"({cfg.max_steps*tps_step/max(1,n_ne):.1f} tokens/param hors emb.)",
             title="[bold green]Entraînement[/]", border_style="green"))
         console.print("[dim]Ctrl+C = arrêt propre (checkpoint sauvegardé). "
                       f"Checkpoint auto toutes les {cfg.ckpt_every_min:g} min.[/]\n")
@@ -436,7 +443,17 @@ class Trainer:
         use_cuda = self.device.startswith("cuda")
         step_times = deque(maxlen=50)
 
-        with Live(console=console, refresh_per_second=4, transient=False) as live:
+        # sans TTY (logs Modal, nohup, CI) le tableau Live n'est jamais rafraîchi :
+        # on bascule sur des lignes de log classiques
+        interactive = console.is_terminal
+        print_every = max(cfg.log_every, 100)
+        if not interactive:
+            console.print(f"[i] sortie non-interactive — progression toutes les {print_every} steps, "
+                          f"eval toutes les {cfg.eval_every}")
+
+        live_ctx = (Live(console=console, refresh_per_second=4, transient=False)
+                    if interactive else contextlib.nullcontext())
+        with live_ctx as live:
             while self.step < cfg.max_steps and not self.stop_requested:
                 t_step = time.perf_counter()
                 profile = (self.step % cfg.profile_every == 0) and use_cuda
@@ -517,10 +534,17 @@ class Trainer:
                     if self.val_loss < self.best_val:
                         self.best_val = self.val_loss
                         is_best = True
+                    if not interactive:
+                        console.print(f"eval  step {self.step} · val {self.val_loss:.4f} · "
+                                      f"ppl {math.exp(min(20, self.val_loss)):.1f}"
+                                      + (" · meilleur" if is_best else ""))
 
                 if cfg.sample_every and self.step % cfg.sample_every == 0:
                     self.last_sample = self.sample()
                     self.last_sample_step = self.step
+                    if not interactive:
+                        console.print(f"éch.  step {self.step} · {self.last_sample[:200]}",
+                                      markup=False, highlight=False)
 
                 # --- checkpoint temporel ------------------------------------------------
                 due = (time.time() - self.last_ckpt_time) >= cfg.ckpt_every_min * 60
@@ -529,14 +553,25 @@ class Trainer:
                     self.last_ckpt_time = time.time()
                     tag = " [green](meilleur)[/]" if is_best else ""
                     self.last_ckpt_msg = f"step {self.step} · {time.strftime('%H:%M:%S')}{tag}"
+                    if not interactive:
+                        console.print(f"ckpt  step {self.step} sauvegardé"
+                                      + (" (meilleur)" if is_best else ""))
 
                 if stop_file.exists():
                     stop_file.unlink(missing_ok=True)
                     self.stop_requested = True
 
-                live.update(self._dashboard(
-                    Group, Panel, Table, Columns, Text, cur_lr, gn, mfu, stats_acc,
-                    n_params, n_ne, tps_step, step_times))
+                if interactive:
+                    live.update(self._dashboard(
+                        Group, Panel, Table, Columns, Text, cur_lr, gn, mfu, stats_acc,
+                        n_params, n_ne, tps_step, step_times))
+                elif self.step % print_every == 0 or self.step == cfg.max_steps:
+                    eta = (cfg.max_steps - self.step) * float(np.mean(step_times))
+                    console.print(f"step  {self.step}/{cfg.max_steps} "
+                                  f"({100*self.step/cfg.max_steps:.1f}%) · "
+                                  f"loss {loss_val:.4f} · EMA {self.loss_ema:.4f} · "
+                                  f"lr {cur_lr:.2e} · {self.tps_ema/1e3:.0f}k tok/s · "
+                                  f"MFU {100*mfu:.1f}% · ETA {int(eta//3600)}h{int(eta%3600//60):02d}")
 
         # ---- sortie ---------------------------------------------------------------
         self.ckpt.save(self.state_payload(), self.step, is_best=False)
@@ -625,7 +660,7 @@ class Trainer:
         t4.add_column(min_width=14)
         kv(t4, "step", f"{self.step}/{cfg.max_steps}  ({100*pct:.1f} %)", "bold")
         kv(t4, "tokens vus", human(self.tokens_seen), "bold")
-        kv(t4, "tokens/param", f"{self.tokens_seen/max(1,n_params):.1f}")
+        kv(t4, "tokens/param", f"{self.tokens_seen/max(1,n_ne):.1f} (hors emb.)")
         kv(t4, "époques corpus", f"{self.tokens_seen/max(1,len(self.train_data)):.2f}")
         kv(t4, "écoulé", hms(elapsed))
         kv(t4, "ETA", hms(eta), "cyan")
@@ -673,7 +708,10 @@ def cmd_chat(args):
     run_dir = Path(args.out_dir) / args.run
     # On préfère la phase RL (la plus affûtée), puis SFT, et on retombe sur le
     # pré-entraînement si rien d'autre n'a tourné.
-    stages = [args.stage] if args.stage else ["rl", "sft", "mid", "pretrain"]
+    # Les phases RLAIF successives vivent dans rlaif, rlaif2, rlaif3… : on prend la
+    # plus récente d'abord (tri décroissant), puis on redescend la chaîne.
+    rlaifs = sorted((d.name for d in run_dir.glob("rlaif*") if d.is_dir()), reverse=True)
+    stages = [args.stage] if args.stage else [*rlaifs, "rl", "sft", "mid", "pretrain"]
     path = None
     for st in stages:
         d = run_dir / st
@@ -687,9 +725,9 @@ def cmd_chat(args):
         sys.exit(f"[!] Aucun checkpoint dans {run_dir}. Entraîne d'abord : python run.py train")
 
     ck = torch.load(path, map_location="cpu", weights_only=False)
-    mcfg = ModelConfig.from_dict(ck["model_cfg"])
+    mcfg = config_from_dict(ck["model_cfg"])
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = build_model(mcfg).to(device)
+    model = model_from_cfg(mcfg).to(device)
     model.load_state_dict(ck["model"])
     model.eval()
     if device == "cuda":
@@ -850,7 +888,8 @@ def add_train_args(p):
     p.add_argument("--run", default="fr-micro", help="nom du run (dossier dans runs/)")
     p.add_argument("--data-dir", default="data")
     p.add_argument("--out-dir", default="runs")
-    p.add_argument("--preset", default="micro", choices=list(PRESETS))
+    p.add_argument("--preset", default="micro", choices=list(PRESETS) + list(PRESETS_V3),
+                   help="presets v3-* = architecture speedrun (model_v3.py)")
     p.add_argument("--hybrid", action="store_true",
                    help="archi Qwen3.5 complète : couches Gated DeltaNet + attention en 3:1 "
                         "(exacte mais ~3,5x plus lente sans kernels Triton)")
@@ -924,6 +963,9 @@ def main():
     p.add_argument("--no-sft", action="store_true", help="ne pas préparer le jeu de dialogue")
     p.add_argument("--skip-download", action="store_true", help="réutilise les .jsonl déjà téléchargés")
     p.add_argument("--seq-len", type=int, default=1024)
+    p.add_argument("--rebin", action="store_true",
+                   help="re-binarise SEULEMENT mid+SFT avec le tokenizer existant "
+                        "(après un changement de recette : distill, sur-échantillonnage…)")
 
     p = sub.add_parser("train", help="pré-entraînement")
     add_train_args(p)
@@ -950,6 +992,47 @@ def main():
     p.add_argument("--kl-beta", type=float, default=0.03)
     p.add_argument("--micro-bs", type=int, default=8)
     p.add_argument("--eval-every", type=int, default=25)
+    p.add_argument("--instr-frac", type=float, default=0.3,
+                   help="part des prompts avec consigne vérifiable (IF-RLVR, façon Tülu 3)")
+    p.add_argument("--oversample", type=float, default=2.0,
+                   help="dynamic sampling (DAPO) : re-tirages max pour remplir le batch de groupes utiles")
+    p.add_argument("--ckpt-every-min", type=float, default=5.0)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--resume", nargs="?", const="latest", default=None)
+
+    p = sub.add_parser("rlaif", help="GRPO à juge LLM : pool quotidien + protocole fichiers (voir frlm/rlaif.py)")
+    p.add_argument("--run", default="fr-v4")
+    p.add_argument("--out-dir", default="runs")
+    p.add_argument("--max-steps", type=int, default=100)
+    p.add_argument("--prompts", type=int, default=6, help="groupes GRPO par step")
+    p.add_argument("--group", type=int, default=6, help="réponses échantillonnées par problème")
+    p.add_argument("--max-new", type=int, default=220)
+    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--lr", type=float, default=1e-5)
+    p.add_argument("--kl-beta", type=float, default=0.04)
+    p.add_argument("--micro-bs", type=int, default=6)
+    p.add_argument("--eval-every", type=int, default=25)
+    p.add_argument("--pool", default="data-v4/rlaif_prompts.jsonl,data-v4/rlaif_prompts_v2.jsonl",
+                   help="un ou plusieurs fichiers de prompts, séparés par des virgules")
+    p.add_argument("--stage-name", default="rlaif",
+                   help="sous-dossier de sortie (rlaif2 pour une 2e passe : sinon on "
+                        "écrase le ckpt_best de la première)")
+    p.add_argument("--init-stage", default="rl", choices=["rl", "sft", "rlaif", "rlaif2"],
+                   help="ckpt de départ ET ancre KL")
+    p.add_argument("--init-ckpt", default="best")
+    p.add_argument("--judge-weight", type=float, default=1.0)
+    p.add_argument("--synth-frac", type=float, default=0.35)
+    p.add_argument("--ppo-epochs", type=int, default=2,
+                   help="réutilisations du lot de rollouts (clip-higher actif au-delà de 1)")
+    p.add_argument("--clip-high", type=float, default=0.28,
+                   help="borne haute du ratio (DAPO clip-higher, anti-collapse d'entropie)")
+    p.add_argument("--overlong-penalty", type=float, default=0.3,
+                   help="pénalité de génération coupée sans conclusion (anti think-fleuve)")
+    p.add_argument("--repeat-penalty", type=float, default=0.3,
+                   help="pénalité de radotage (n-grammes répétés)")
+    p.add_argument("--oversample", type=float, default=2.5,
+                   help="dynamic sampling : re-tirages max pour éviter les groupes muets")
+    p.add_argument("--judge-timeout", type=float, default=1800.0)
     p.add_argument("--ckpt-every-min", type=float, default=5.0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--resume", nargs="?", const="latest", default=None)
@@ -958,8 +1041,8 @@ def main():
     p.add_argument("--run", default="fr-micro")
     p.add_argument("--out-dir", default="runs")
     p.add_argument("--ckpt", default="latest", help="latest | best | chemin vers un .pt")
-    p.add_argument("--stage", default=None, choices=["pretrain", "mid", "sft", "rl"],
-                   help="force la phase à charger (défaut : rl, sinon sft, mid, pretrain)")
+    p.add_argument("--stage", default=None, choices=["pretrain", "mid", "sft", "rl", "rlaif"],
+                   help="force la phase à charger (défaut : rlaif, puis rl, sft, mid, pretrain)")
     p.add_argument("--temperature", type=float, default=0.8)
     p.add_argument("--top-k", type=int, default=50)
     p.add_argument("--top-p", type=float, default=0.95)
@@ -973,7 +1056,14 @@ def main():
 
     args = ap.parse_args()
 
-    if args.cmd == "prepare":
+    if args.cmd == "prepare" and args.rebin:
+        rep = D.rebin_mid_sft(Path(args.data_dir), mid_frac=args.mid_frac,
+                              max_seq_len=args.seq_len)
+        print("\n=== Récapitulatif ===")
+        print(json.dumps(rep, indent=2, ensure_ascii=False))
+        print("\nÉtape suivante :  python run.py mid --resume latest")
+
+    elif args.cmd == "prepare":
         mix = {}
         for part in args.mix.split(","):
             k, v = part.split(":")
@@ -995,6 +1085,10 @@ def main():
     elif args.cmd == "rl":
         from frlm.rl import cmd_rl
         cmd_rl(args)
+
+    elif args.cmd == "rlaif":
+        from frlm.rlaif import cmd_rlaif
+        cmd_rlaif(args)
 
     elif args.cmd == "chat":
         cmd_chat(args)

@@ -593,6 +593,243 @@ def p_liquide(rng: random.Random) -> dict:
             "ans": cur, "level": 2 if n_ops == 2 else 3}
 
 
+# --------------------------------------------------------------------------------------
+# v4 : les familles du « jamais-enseigné ». Le bench OOD du 2026-08-21 a mesuré
+# 1/10 sur les concepts absents du corpus (heures, fractions, « x fois plus »,
+# périmètre, âges, arrondi de boîtes, énoncés inversés). On les enseigne.
+# RÈGLE D'HYGIÈNE : le bench_ood actuel devient de fait in-distribution — les
+# familles secrètes du futur bench_ood v2 ne doivent JAMAIS apparaître ici.
+# --------------------------------------------------------------------------------------
+_EN_LETTRES = ["zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit",
+               "neuf", "dix", "onze", "douze", "treize", "quatorze", "quinze", "seize"]
+
+
+def p_heure(rng: random.Random) -> dict:
+    """Heures qui avancent — passage de minuit au niveau 3."""
+    lvl = rng.choice((1, 1, 2, 3))
+    if lvl == 3:
+        h = rng.randint(18, 23)
+        d = rng.randint(25 - h, 11)          # force le passage de minuit
+    else:
+        h = rng.randint(6, 20)
+        d = rng.randint(1, min(9, 23 - h))
+    fin = (h + d) % 24
+    duree = f"{d} heure" + ("s" if d > 1 else "")
+    i = rng.randrange(4)
+    q = [f"Il est {h} h. Quelle heure sera-t-il dans {duree} ?",
+         f"Un film commence à {h} h et dure {duree}. À quelle heure se termine-t-il ?",
+         f"Le train part à {h} h et le trajet dure {duree}. À quelle heure arrive-t-il ?",
+         f"Le magasin ouvre à {h} h et reste ouvert {duree}. À quelle heure ferme-t-il ?"][i]
+    a = [f"Il sera {fin} h.", f"Le film se termine à {fin} h.",
+         f"Le train arrive à {fin} h.", f"Le magasin ferme à {fin} h."][i]
+    steps = [f"{h} + {d} = {h + d}"]
+    if h + d >= 24:
+        steps.append(f"une journée compte 24 heures : {h + d} − 24 = {fin}")
+    return {"q": q, "steps": steps, "a": a, "ans": fin, "level": lvl}
+
+
+def p_par_jour(rng: random.Random) -> dict:
+    """Débit quotidien × durée — et « une semaine = 7 jours »."""
+    p = rng.choice(PRENOMS)
+    n = rng.choice((2, 3, 4, 5, 6, 8, 10, 12))
+    verbe, sg, plu = rng.choice((("lit", "page", "pages"), ("écrit", "ligne", "lignes"),
+                                 ("plante", "graine", "graines"), ("ramasse", "coquillage", "coquillages")))
+    en_semaine = rng.random() < 0.5
+    j = 7 if en_semaine else rng.randint(3, 9)
+    quand = "en une semaine" if en_semaine else f"en {j} jours"
+    res = n * j
+    q = rng.choice((f"{p} {verbe} {n} {plu if n > 1 else sg} par jour. Combien de {plu} {quand} ?",
+                    f"Chaque jour, {p} {verbe} {n} {plu if n > 1 else sg}. Combien {quand} ?"))
+    steps = (["une semaine compte 7 jours"] if en_semaine else []) + steps_mul(n, j)
+    return {"q": q, "steps": steps, "a": f"Cela fait {res} {plu} {quand}.",
+            "ans": res, "level": 2}
+
+
+def p_age(rng: random.Random) -> dict:
+    """Âges : année de naissance, « x ans de plus », somme d'âges."""
+    p = rng.choice(PRENOMS)
+    mode = rng.random()
+    if mode < 0.45:                          # année de naissance
+        naiss = rng.randint(1950, 2020)
+        annee = rng.randint(max(naiss + 4, 2021), 2035)
+        age = annee - naiss
+        e = "" if p in PRENOMS_M else "e"
+        q = rng.choice((f"{p} est né{e} en {naiss}. Quel âge a-t-{_il(p)} en {annee} ?",
+                        f"{p} est né{e} en {naiss}. Quel est son âge en {annee} ?"))
+        return {"q": q, "steps": [f"{annee} − {naiss} = {age}"],
+                "a": f"{p} a {age} ans.", "ans": age, "level": 2}
+    if mode < 0.75:                          # écart d'âge
+        n, k = rng.randint(4, 60), rng.randint(1, 10)
+        plus = rng.random() < 0.6
+        lien, pos = rng.choice((("frère", "son"), ("sœur", "sa"), ("cousin", "son"),
+                                ("cousine", "sa"), ("voisin", "son"), ("voisine", "sa")))
+        res = n + k if plus else n - k
+        que_lui = "que lui" if p in PRENOMS_M else "qu'elle"
+        q = (f"{p} a {n} ans. {pos.capitalize()} {lien} a {k} ans de "
+             f"{'plus' if plus else 'moins'} {que_lui}. Quel âge a {pos} {lien} ?")
+        st = steps_add(n, k) if plus else steps_sub(n, k)
+        return {"q": q, "steps": st, "a": f"{pos.capitalize()} {lien} a {res} ans.",
+                "ans": res, "level": 2}
+    x, y = rng.randint(25, 55), rng.randint(25, 55)   # somme d'âges
+    duo = rng.choice((("Papa", "maman"), ("Grand-père", "grand-mère"), ("Le père", "la mère")))
+    q = rng.choice((f"{duo[0]} a {x} ans et {duo[1]} a {y} ans. Quelle est la somme de leurs âges ?",
+                    f"{duo[0]} a {x} ans et {duo[1]} a {y} ans. Quel âge ont-ils à eux deux ?"))
+    return {"q": q, "steps": steps_add(x, y),
+            "a": f"À eux deux, ils ont {x + y} ans.", "ans": x + y, "level": 2}
+
+
+def p_fois_plus(rng: random.Random) -> dict:
+    """« x fois plus / x fois moins » — multiplication déguisée en comparaison."""
+    p1, p2 = rng.sample(PRENOMS, 2)
+    o = _obj(rng)
+    k, n = rng.randint(2, 6), rng.randint(2, 12)
+    res = k * n
+    if rng.random() < 0.25:                  # fois moins : division
+        q = (f"{p1} a {k} fois moins {_de(o)} que {p2}. "
+             f"{p2} en a {res}. Combien {p1} en a-t-{_il(p1)} ?")
+        return {"q": q, "steps": steps_div(res, k),
+                "a": f"{p1} a {_qty(o, n)}.", "ans": n, "level": 3}
+    q = rng.choice((f"{p1} a {k} fois plus {_de(o)} que {p2}. "
+                    f"{p2} en a {n}. Combien {p1} en a-t-{_il(p1)} ?",
+                    f"{p2} a {_qty(o, n)}. {p1} en a {k} fois plus. "
+                    f"Combien {_de(o)} a {p1} ?"))
+    return {"q": q, "steps": steps_mul(k, n),
+            "a": f"{p1} a {_qty(o, res)}.", "ans": res, "level": 2}
+
+
+def p_fraction(rng: random.Random) -> dict:
+    """Moitié, tiers, quart, trois quarts — toujours sur un total divisible."""
+    label, den, num = rng.choice((("la moitié", 2, 1), ("le tiers", 3, 1),
+                                  ("un tiers", 3, 1), ("le quart", 4, 1),
+                                  ("un quart", 4, 1), ("les trois quarts", 4, 3)))
+    unit = rng.randint(2, 15)
+    total, res = den * unit, num * unit
+    steps = [f"{total} ÷ {den} = {unit}"]
+    if num > 1:
+        steps.append(f"{unit} × {num} = {res}")
+    if rng.random() < 0.5:                   # calcul pur
+        q = rng.choice((f"Combien font {label} de {total} ?",
+                        f"Quel est {label} de {total} ?"))
+        return {"q": q, "steps": steps,
+                "a": f"{label.capitalize()} de {total}, c'est {res}.", "ans": res, "level": 2}
+    o = _obj(rng)                            # en contexte
+    p = rng.choice(PRENOMS)
+    q = rng.choice((f"{p} a {_qty(o, total)}. {_il(p).capitalize()} en donne {label}. "
+                    f"Combien en donne-t-{_il(p)} ?",
+                    f"Sur {_qty(o, total)}, {label} {'sont' if num * unit > 1 else 'est'} "
+                    f"dans un panier. Combien dans le panier ?"))
+    return {"q": q, "steps": steps, "a": f"Cela fait {_qty(o, res)}.",
+            "ans": res, "level": 2}
+
+
+def p_perimetre(rng: random.Random) -> dict:
+    """Périmètre du carré et du rectangle."""
+    if rng.random() < 0.6:
+        c = rng.randint(2, 15)
+        res = 4 * c
+        q = rng.choice((f"Chaque côté d'un carré mesure {c} cm. Quel est son périmètre ?",
+                        f"Quel est le périmètre d'un carré de {c} cm de côté ?"))
+        return {"q": q, "steps": ["un carré a 4 côtés égaux", f"4 × {c} = {res}"],
+                "a": f"Le périmètre est de {res} cm.", "ans": res, "level": 2}
+    lo, la = sorted((rng.randint(2, 12), rng.randint(3, 15)))
+    res = 2 * (lo + la)
+    q = f"Un rectangle mesure {la} cm de long et {lo} cm de large. Quel est son périmètre ?"
+    return {"q": q, "steps": ["le périmètre, c'est deux fois longueur plus largeur",
+                              f"{la} + {lo} = {la + lo}", f"2 × {la + lo} = {res}"],
+            "a": f"Le périmètre est de {res} cm.", "ans": res, "level": 3}
+
+
+def p_monnaie(rng: random.Random) -> dict:
+    """Argent : billets à compter, ou achat + monnaie rendue (deux opérations)."""
+    if rng.random() < 0.4:
+        k, val = rng.randint(2, 5), rng.choice((5, 10, 20, 50))
+        res = k * val
+        q = rng.choice((f"J'ai {k} billets de {val} euros. Combien d'argent ai-je en tout ?",
+                        f"Dans ma tirelire il y a {k} billets de {val} euros. Quelle somme cela fait-il ?"))
+        return {"q": q, "steps": steps_mul(k, val),
+                "a": f"Cela fait {_eur(res)} en tout.", "ans": res, "level": 2}
+    n, prix = rng.randint(2, 5), rng.randint(1, 5)
+    cout = n * prix
+    billet = min(b for b in (5, 10, 20, 50) if b > cout)
+    rendu = billet - cout
+    art = rng.choice((("croissant", "croissants"), ("cahier", "cahiers"),
+                      ("stylo", "stylos"), ("pain au chocolat", "pains au chocolat")))
+    q = (f"J'achète {n} {art[1]} à {_eur(prix)} pièce. Je paie avec un billet de "
+         f"{billet} euros. " + rng.choice(("On me rend combien ?", "Combien me rend-on ?")))
+    return {"q": q, "steps": steps_mul(n, prix) + steps_sub(billet, cout),
+            "a": f"On me rend {_eur(rendu)}.", "ans": rendu, "level": 3}
+
+
+def p_lettres(rng: random.Random) -> dict:
+    """Nombres écrits en toutes lettres — « trois plus cinq »."""
+    op = rng.choice(("plus", "plus", "moins", "fois"))
+    if op == "fois":
+        x, y = rng.randint(2, 6), rng.randint(2, 6)
+        res, sym = x * y, "×"
+    elif op == "moins":
+        x, y = sorted((rng.randint(0, 16), rng.randint(0, 16)), reverse=True)
+        res, sym = x - y, "−"
+    else:
+        x, y = rng.randint(0, 9), rng.randint(0, 9)
+        res, sym = x + y, "+"
+    lx, ly = _EN_LETTRES[x], _EN_LETTRES[y]
+    q = rng.choice((f"Combien font {lx} {op} {ly} ?",
+                    f"Que vaut {lx} {op} {ly} ?",
+                    f"{lx.capitalize()} {op} {ly}, ça fait combien ?"))
+    return {"q": q,
+            "steps": [f"{lx} = {x} et {ly} = {y}", f"{x} {sym} {y} = {res}"],
+            "a": f"{lx.capitalize()} {op} {ly} font {res}.", "ans": res, "level": 1}
+
+
+def p_inverse(rng: random.Random) -> dict:
+    """Énoncé inversé : retrouver l'état INITIAL — le piège qui a coulé le bench."""
+    o = _obj(rng)
+    p = rng.choice(PRENOMS)
+    il = _il(p)
+    k, reste = rng.randint(2, 30), rng.randint(2, 60)
+    if rng.random() < 0.5:                   # x − k = reste  ->  départ = reste + k
+        depart = reste + k
+        evt = rng.choice((f"en a perdu {k}", f"en a donné {k}", f"en a vendu {k}"))
+        q = rng.choice((f"{p} avait des {o[1]}. {il.capitalize()} {evt}, et il lui en "
+                        f"reste {reste}. Combien en avait-{il} au départ ?",
+                        f"Après avoir perdu {k} {o[1]}, {p} en a encore {reste}. "
+                        f"Combien en avait-{il} avant ?"))
+        steps = [f"le nombre de départ a diminué de {k} pour arriver à {reste}",
+                 f"on remonte : {reste} + {k} = {depart}"]
+    else:                                    # x + k = total  ->  départ = total − k
+        total = reste + k
+        depart = reste
+        q = rng.choice((f"Après avoir reçu {k} {o[1]}, {p} en a {total}. "
+                        f"Combien en avait-{il} avant ?",
+                        f"{p} a ramassé {k} {o[1]} et en possède maintenant {total}. "
+                        f"Combien en avait-{il} au début ?"))
+        steps = [f"le nombre de départ a augmenté de {k} pour arriver à {total}",
+                 f"on redescend : {total} − {k} = {depart}"]
+    return {"q": q, "steps": steps,
+            "a": f"{p} en avait {depart} au départ.", "ans": depart, "level": 3}
+
+
+def p_boites(rng: random.Random) -> dict:
+    """Division « pour de vrai » : quand ça ne tombe pas juste, on arrondit AU-DESSUS."""
+    taille = rng.choice((4, 6, 10, 12))
+    obj, sg, plu, chacun = rng.choice((("œufs", "boîte", "boîtes", "chacune"),
+                                       ("gâteaux", "paquet", "paquets", "chacun"),
+                                       ("bouteilles", "carton", "cartons", "chacun")))
+    k = rng.randint(3, 8)
+    exact = rng.random() < 0.5
+    besoin = taille * k + (0 if exact else rng.randint(1, taille - 1))
+    res = k if exact else k + 1
+    q = (f"Il me faut {besoin} {obj}. Les {plu} contiennent {taille} {obj} {chacun}. "
+         f"Combien de {plu} dois-je acheter ?")
+    if exact:
+        steps = steps_div(besoin, taille)
+    else:
+        steps = [f"{taille} × {k} = {taille * k} : pas assez, il manque {besoin - taille * k} {obj}",
+                 f"il faut donc {res} {plu} ({taille} × {res} = {taille * res}, assez pour {besoin})"]
+    return {"q": q, "steps": steps, "a": f"Il faut acheter {res} {plu}.",
+            "ans": res, "level": 3}
+
+
 GENERATEURS = [
     (p_calc, 0.18), (p_reste, 0.10), (p_gain, 0.09), (p_achat, 0.09),
     (p_partage, 0.06), (p_double_moitie, 0.05), (p_comparaison, 0.06),
@@ -600,6 +837,10 @@ GENERATEURS = [
     (p_transitivite, 0.04), (p_parite, 0.01),
     (p_etat, 0.08), (p_somme_longue, 0.05), (p_groupes, 0.05),
     (p_expr, 0.05), (p_liquide, 0.04),          # v2.2 : les trous du bench OOD
+    # v4 : le jamais-enseigné (rng.choices normalise — part totale ~27%)
+    (p_heure, 0.04), (p_par_jour, 0.03), (p_age, 0.04), (p_fois_plus, 0.04),
+    (p_fraction, 0.05), (p_perimetre, 0.02), (p_monnaie, 0.04), (p_lettres, 0.03),
+    (p_inverse, 0.06), (p_boites, 0.03),
 ]
 _FNS = [g for g, _ in GENERATEURS]
 _W = [w for _, w in GENERATEURS]

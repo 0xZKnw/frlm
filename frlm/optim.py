@@ -131,7 +131,7 @@ def build_optimizers(model, args) -> tuple[list[torch.optim.Optimizer], dict]:
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        if "embed_tokens" in name or "lm_head" in name:
+        if "embed" in name or "lm_head" in name:   # embed_tokens, value_embeds, lm_head
             adam_decay.append(p)
         elif p.ndim == 2 and "conv" not in name:
             muon_params.append(p)

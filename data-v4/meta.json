@@ -1,0 +1,104 @@
+{
+  "target_tokens": 3000000000,
+  "vocab_size": 24576,
+  "mix": {
+    "fineweb": 0.55,
+    "wiki": 0.15,
+    "maths": 0.15,
+    "books": 0.06,
+    "theses": 0.04,
+    "chat": 0.03,
+    "europarl": 0.01,
+    "oral": 0.01
+  },
+  "download": [
+    {
+      "source": "synth-pretrain",
+      "docs": 2567728,
+      "chars": 1620000284
+    },
+    {
+      "source": "books",
+      "docs": 1564,
+      "chars": 648134543,
+      "seconds": 129.2
+    },
+    {
+      "source": "theses",
+      "docs": 924,
+      "chars": 432378256,
+      "seconds": 207.9
+    },
+    {
+      "source": "chat",
+      "docs": 255757,
+      "chars": 324001707,
+      "seconds": 52.4
+    },
+    {
+      "source": "europarl",
+      "docs": 1353,
+      "chars": 108033855,
+      "seconds": 18.0
+    },
+    {
+      "source": "oral",
+      "docs": 23954,
+      "chars": 108000216,
+      "seconds": 109.5
+    }
+  ],
+  "tokenizer": {
+    "path": "data-v4\\tokenizer.json",
+    "vocab_size": 24576,
+    "eot": 0,
+    "im_start": 1,
+    "im_end": 2
+  },
+  "pretrain": {
+    "train_tokens": 3099970897,
+    "val_tokens": 15916395,
+    "chars": 10800550869,
+    "chars_per_token": 3.466
+  },
+  "midtrain": {
+    "train_tokens": 724875793,
+    "val_tokens": 3712922,
+    "chars": 2052770615,
+    "chars_per_token": 2.817
+  },
+  "download_sft": [
+    {
+      "source": "alpaca",
+      "docs": 92230,
+      "chars": 40000888,
+      "seconds": 15.2
+    },
+    {
+      "source": "reasoning",
+      "docs": 17618,
+      "chars": 49723789,
+      "seconds": 48.6
+    },
+    {
+      "source": "gsm8k",
+      "docs": 7388,
+      "chars": 4627556,
+      "seconds": 3.4
+    },
+    {
+      "source": "synth-sft",
+      "docs": 172327,
+      "chars": 25000034
+    }
+  ],
+  "sft": {
+    "conversations": 533098,
+    "train_tokens": 100478778,
+    "val_tokens": 976598,
+    "supervised_tokens": 70053280,
+    "repeats": {
+      "distill": 16
+    }
+  }
+}
