@@ -13,7 +13,8 @@
 #   modal run modal_app.py --gpu a100 --cmd "python run.py train --preset v4-base ..."
 #
 # Fichiers vers/depuis le Volume :
-#   modal volume put frlm-vol data-v4 /data-v4                    # envoyer les bins
+#   modal volume put frlm-vol data-v4/mid_train.bin /data-v4/mid_train.bin
+#   # envoyer de même mid_val.bin, sft_*.bin, sft_*.mask et meta.json uniquement
 #   modal volume get frlm-vol /runs/fr-v4 runs/fr-v4              # rapatrier un ckpt
 # --------------------------------------------------------------------------------------
 import subprocess
@@ -51,7 +52,8 @@ def _executer(cmd: str, peak: float) -> None:
     subprocess.run("ln -sfn /vol/data-v4 /root/app/data-v4 && "
                    "mkdir -p /vol/runs && ln -sfn /vol/runs /root/app/runs",
                    shell=True, check=True)
-    if "--gpu-peak-tflops" not in cmd and ("bench_speed" in cmd or " train" in cmd):
+    if ("--gpu-peak-tflops" not in cmd
+            and any(k in cmd for k in ("bench_speed", " train", " mid", " sft"))):
         cmd += f" --gpu-peak-tflops {peak}"
 
     # commit du Volume toutes les 10 min : une préemption/crash au milieu d'un run

@@ -54,12 +54,13 @@ The Git repository includes the v4 code, tokenizer, data metadata, RLAIF prompt
 pools, and benchmark reports. It deliberately excludes raw corpora, tokenized
 binaries, masks, run logs, judge exchanges, optimizer states, and multi-gigabyte
 checkpoints. Regenerate data with `python run.py prepare`, or use your own compatible
-checkpoint under `runs/<name>/<phase>/ckpt_latest.pt`.
+checkpoint under `runs/<name>/<phase>/ckpt_latest.pt` or `ckpt_best.pt`.
 
 Example v4 commands:
 
 ```bash
 python run.py prepare --data-dir data-v4 --target-tokens 3e9 --vocab-size 24576 --seq-len 2048 \
+  --mid-frac 0.12 --sft-target-supervised 50e6 \
   --mix "fineweb:0.55,wiki:0.15,maths:0.15,books:0.06,theses:0.04,chat:0.03,europarl:0.01,oral:0.01"
 python run.py train --data-dir data-v4 --run fr-v4 --preset v4-base --seq-len 2048
 python run.py mid --data-dir data-v4 --run fr-v4 --preset v4-base --seq-len 2048
@@ -68,6 +69,43 @@ python run.py rl --run fr-v4
 python run.py rlaif --run fr-v4
 python bench/bench_ood_v2.py --run fr-v4 --data-dir data-v4 --hf none
 ```
+
+### v4.1 post-training recipe
+
+The audited v4.1 recipe removes duplicate prompts across all SFT sources, rejects
+broken or highly repetitive answers, strips overlong reasoning traces while keeping
+their final answers, and balances sources by **assistant tokens** instead of JSONL
+file size. SFT batches now start at conversation boundaries, so a supervised answer
+never loses its prompt at the left edge of a random training window. The midtrain is
+a gentler 12% annealing pass: 30% fresh synthetic math, 12% clean deduplicated
+instructions, and 58% natural French. Run the read-only source audit with:
+
+```bash
+python -m frlm.audit_data --data-dir data-v4
+```
+
+To rebuild only the derived mid/SFT files without touching the tokenizer or the
+pretrain binaries/checkpoint:
+
+```bash
+python run.py prepare --data-dir data-v4 --rebin --skip-download --mid-frac 0.12 \
+  --seq-len 2048 --sft-target-supervised 50e6
+```
+
+Use a new run name so the first v4 post-training remains intact. On an H100, a
+conservative reproducible launch is:
+
+```bash
+modal run --detach modal_app.py --gpu h100 --spawn --cmd \
+  "python run.py mid --data-dir data-v4 --run fr-v4-v41 --preset v4-base --seq-len 2048 --batch-size 16 --grad-accum 2 --max-steps 6000 --optimizer muon --lr 0.004 --adam-lr 0.0002 --schedule cosine --warmup 50 --eval-every 100 --resume runs/fr-v4/pretrain/ckpt_best.pt"
+
+modal run --detach modal_app.py --gpu h100 --spawn --cmd \
+  "python run.py sft --data-dir data-v4 --run fr-v4-v41 --preset v4-base --seq-len 2048 --batch-size 16 --grad-accum 2 --max-steps 2500 --optimizer adamw --lr 0.00008 --weight-decay 0.01 --schedule cosine --warmup 50 --eval-every 100 --resume latest"
+```
+
+Upload only `mid_train.bin`, `mid_val.bin`, the four `sft_*.bin`/`sft_*.mask`
+files, `meta.json`, and (if absent from the Volume) the pretrain checkpoint. Raw
+JSONL corpora and pretrain binaries are not needed for these two Modal phases.
 
 ---
 
@@ -201,10 +239,9 @@ Dropping a `STOP` file in the run directory does the same thing remotely.
 | `gsm8k` | `cmh/gsm8k_fr` | translated grade-school word problems, step by step |
 | `maths` / `maths_sft` | **generated locally by `synth.py`** | French arithmetic/logic, Python-computed solutions |
 
-The midtrain (annealing) phase re-runs a reasoning-dense mix — 45% fresh synthetic
-math — while the LR decays: it's the phase that imprints hardest, and the one that
-repaired mid-run failures (long sums, "3 boxes of 12" groupings, multi-step state
-tracking) within a single hour.
+The v4.1 midtrain (annealing) phase re-runs a balanced mix — 30% fresh synthetic
+math, 12% clean instructions, and 58% natural French — while a low learning rate
+decays. It concentrates reasoning late without sacrificing the language substrate.
 
 ---
 

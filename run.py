@@ -324,21 +324,34 @@ class Trainer:
 
     def load_checkpoint(self, spec: str):
         path = self.ckpt.resolve(spec)
+        if path is None and spec in ("latest", "auto", ""):
+            # Un téléchargement depuis Modal garde souvent seulement ckpt_best.pt.
+            # Retomber dessus vaut infiniment mieux qu'un démarrage silencieux à zéro.
+            path = self.ckpt.resolve("best")
+            if path:
+                print(f"[i] {self.cfg.stage} : latest absent, repli sur {path.name}")
         if path is None and self.cfg.stage == "sft":
             # pas encore de checkpoint SFT -> on part du midtrain s'il existe, sinon
             # du pré-entraînement
             for phase in ("mid", "pretrain"):
-                path = CheckpointManager(self.run_dir / phase).resolve("latest")
+                manager = CheckpointManager(self.run_dir / phase)
+                for candidate in ("latest", "best"):
+                    path = manager.resolve(candidate)
+                    if path:
+                        print(f"[i] Démarrage du SFT depuis la phase '{phase}' : {path}")
+                        break
                 if path:
-                    print(f"[i] Démarrage du SFT depuis la phase '{phase}' : {path}")
                     break
         if path is None and self.cfg.stage == "mid":
-            path = CheckpointManager(self.run_dir / "pretrain").resolve("latest")
-            if path:
-                print(f"[i] Démarrage du midtrain depuis le pré-entraînement : {path}")
+            manager = CheckpointManager(self.run_dir / "pretrain")
+            for candidate in ("latest", "best"):
+                path = manager.resolve(candidate)
+                if path:
+                    print(f"[i] Démarrage du midtrain depuis le pré-entraînement : {path}")
+                    break
         if path is None:
-            print(f"[i] Aucun checkpoint à reprendre ({spec}) — démarrage à zéro.")
-            return
+            sys.exit(f"[!] Checkpoint demandé introuvable ({spec}). Refus de démarrer "
+                     f"la phase '{self.cfg.stage}' à zéro.")
         ck = torch.load(path, map_location=self.device, weights_only=False)
         self.raw_model.load_state_dict(ck["model"])
         # au passage pretrain -> sft on repart des poids mais pas de l'état optimiseur
@@ -960,6 +973,8 @@ def main():
                    help="mélange source:poids séparés par des virgules")
     p.add_argument("--mid-frac", type=float, default=0.2,
                    help="taille du corpus midtrain en fraction du pré-entraînement (0 = pas de midtrain)")
+    p.add_argument("--sft-target-supervised", type=float, default=D.SFT_TARGET_SUPERVISED,
+                   help="tokens assistant visés dans le mix SFT pondéré (défaut 50M)")
     p.add_argument("--no-sft", action="store_true", help="ne pas préparer le jeu de dialogue")
     p.add_argument("--skip-download", action="store_true", help="réutilise les .jsonl déjà téléchargés")
     p.add_argument("--seq-len", type=int, default=1024)
@@ -972,12 +987,19 @@ def main():
 
     p = sub.add_parser("mid", help="midtrain : recuit sur un mix dense en raisonnement (mid_train.bin)")
     add_train_args(p)
-    # ~130M tokens de corpus mid ≈ 4000 steps ; cosine = décroissance sur TOUTE la
-    # phase (c'est le recuit), warmup court car on repart de poids déjà entraînés
-    p.set_defaults(max_steps=4000, schedule="cosine", warmup=100)
+    # v4.1 : recuit doux. L'ancien 0.01/1.5e-3 redémarrait très au-dessus de la fin
+    # du prétrain et pouvait effacer les acquis avant même la décroissance.
+    # À bs=16, accumulation=2 et seq=2048, 6000 steps font ~393 M tokens :
+    # quasiment une passe sur le corpus v4.1 mesuré à 405 M tokens.
+    p.set_defaults(max_steps=6000, schedule="cosine", warmup=50, lr=0.004,
+                   adam_lr=2e-4, eval_every=100, sample_every=500)
 
     p = sub.add_parser("sft", help="fine-tuning dialogue (masque de loss sur les réponses)")
     add_train_args(p)
+    # AdamW est plus conservateur pour l'alignement final ; 2500 steps = ~164M
+    # tokens de fenêtres à batch effectif 32, sans les 20k steps destructeurs d'avant.
+    p.set_defaults(max_steps=2500, schedule="cosine", warmup=50, optimizer="adamw",
+                   lr=8e-5, weight_decay=0.01, eval_every=100, sample_every=250)
 
     p = sub.add_parser("rl", help="GRPO : renforcement à récompenses vérifiables (part du SFT)")
     p.add_argument("--run", default="fr-micro")
@@ -1058,7 +1080,8 @@ def main():
 
     if args.cmd == "prepare" and args.rebin:
         rep = D.rebin_mid_sft(Path(args.data_dir), mid_frac=args.mid_frac,
-                              max_seq_len=args.seq_len)
+                              max_seq_len=args.seq_len,
+                              sft_target_supervised=int(args.sft_target_supervised))
         print("\n=== Récapitulatif ===")
         print(json.dumps(rep, indent=2, ensure_ascii=False))
         print("\nÉtape suivante :  python run.py mid --resume latest")
@@ -1070,7 +1093,8 @@ def main():
             mix[k.strip()] = float(v)
         rep = D.prepare_all(Path(args.data_dir), int(args.target_tokens), args.vocab_size, mix,
                             sft=not args.no_sft, max_seq_len=args.seq_len,
-                            skip_download=args.skip_download, mid_frac=args.mid_frac)
+                            skip_download=args.skip_download, mid_frac=args.mid_frac,
+                            sft_target_supervised=int(args.sft_target_supervised))
         print("\n=== Récapitulatif ===")
         print(json.dumps(rep, indent=2, ensure_ascii=False))
         print("\nÉtape suivante :  python run.py train")

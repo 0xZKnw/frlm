@@ -17,10 +17,12 @@ Corpus retenus (tous vérifiés existants sur le Hub) :
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,13 +104,32 @@ V1_MIX = {"fineweb": 0.55, "wiki": 0.25, "chat": 0.20}  # l'ancienne recette, si
 V4_MIX = {"fineweb": 0.55, "wiki": 0.15, "maths": 0.15, "books": 0.06,
           "theses": 0.04, "chat": 0.03, "europarl": 0.01, "oral": 0.01}
 
-# Recette du midtrain (recuit) : on refait une passe courte, dense en raisonnement,
-# sur laquelle tombe la décroissance du LR. C'est la recette moderne : les capacités
-# "chères" (maths, structure) sont sur-représentées pile quand le modèle grave.
-# v3 : petite tranche de distillat Kimi dans le recuit — exposer le format
-# <think> court + tour de parole naturel pile pendant que le modèle grave.
-# La tranche est minuscule (le fichier fait ~0,5M chars) mais placée au bon moment.
-MID_MIX = {"maths": 0.45, "wiki": 0.20, "fineweb": 0.15, "books": 0.15, "distill": 0.05}
+# Recette v4.1 du midtrain. Le précédent mix mettait 45 % de maths synthétiques et
+# prétendait réserver 5 % à un distillat de 0,5 Mo : sa part réelle était quasi
+# nulle. L'audit v4 trouve 156 M caractères d'instructions propres, soit exactement
+# 12 % d'un mid à 0,12 du prétrain. Le reste garde assez de français naturel pour
+# éviter qu'un recuit trop spécialisé dégrade la langue générale.
+MID_MIX = {"maths": 0.30, "wiki": 0.33, "fineweb": 0.15,
+           "books": 0.10, "instruct": 0.12}
+
+# Priorité qualité pour la déduplication inter-sources : si le même prompt existe
+# dans plusieurs jeux, on garde la version vérifiée/concise avant le gros jeu chat.
+SFT_SOURCE_ORDER = ("distill", "gsm8k", "maths_sft", "alpaca", "reasoning", "chat")
+MID_INSTRUCT_SOURCES = ("distill", "gsm8k", "alpaca", "reasoning", "chat")
+
+# Parts visées en TOKENS SUPERVISÉS (pas en taille de fichier). Les limites de
+# répétition empêchent les petites sources de devenir des tables de mémorisation ;
+# tout quota impossible à remplir est redistribué aux sources qui ont de la marge.
+SFT_RECIPE = {
+    "chat":       dict(weight=0.24, max_repeat=1, max_prompt=1200, max_final=1600, max_think=0),
+    "alpaca":     dict(weight=0.22, max_repeat=3, max_prompt=1200, max_final=1600, max_think=0),
+    "reasoning":  dict(weight=0.12, max_repeat=2, max_prompt=2000, max_final=1600, max_think=800),
+    "gsm8k":      dict(weight=0.10, max_repeat=8, max_prompt=1400, max_final=500,  max_think=1200),
+    "maths_sft":  dict(weight=0.30, max_repeat=4, max_prompt=500,  max_final=300,  max_think=500),
+    "distill":    dict(weight=0.02, max_repeat=12, max_prompt=600, max_final=500,  max_think=500),
+}
+SFT_TARGET_SUPERVISED = 50_000_000
+SFT_VAL_SUPERVISED_PER_SOURCE = 100_000
 
 
 def render_chat(messages: list[dict]) -> str:
@@ -414,6 +435,7 @@ def encode_pretrain(tok, jsonl_paths: list[Path], out_dir: Path, val_frac: float
 
     buf: list[str] = []
     rng = random.Random(1234)
+    source_stats: dict[str, dict] = {}
 
     def flush():
         nonlocal buf
@@ -430,6 +452,7 @@ def encode_pretrain(tok, jsonl_paths: list[Path], out_dir: Path, val_frac: float
     for i, p in enumerate(jsonl_paths):
         cap = char_caps[i] if char_caps else None
         file_chars = 0
+        tokens_before = train_w.n + val_w.n
         for rec in tqdm(iter_jsonl(p), desc=f"  tokenize {p.stem:10s}", unit="doc", ncols=90):
             buf.append(rec["t"])
             n_chars += len(rec["t"])
@@ -439,76 +462,254 @@ def encode_pretrain(tok, jsonl_paths: list[Path], out_dir: Path, val_frac: float
             if cap is not None and file_chars >= cap:
                 break
         flush()
+        source_stats[p.stem] = {
+            "chars": file_chars,
+            "tokens": train_w.n + val_w.n - tokens_before,
+            "char_cap": cap,
+        }
 
     n_train, n_val = train_w.n, val_w.n
     train_w.close()
     val_w.close()
     return {"train_tokens": n_train, "val_tokens": n_val, "chars": n_chars,
-            "chars_per_token": round(n_chars / max(1, n_train + n_val), 3)}
+            "chars_per_token": round(n_chars / max(1, n_train + n_val), 3),
+            "sources": source_stats}
 
 
-# Part visée du distillat dans le mix SFT. Le chargeur tire uniformément sur les
-# tokens : une petite source de haute qualité (quelques centaines de k-tokens face à
-# ~45M) serait invisible sans répétition. Le facteur est calculé d'après la taille
-# réelle des fichiers pour atteindre ~cette part, plafonné à 16× (au-delà on
-# mémoriserait les exemples au lieu d'en absorber le style).
-DISTILL_SHARE = 0.05
+_THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
+_WORDS_RE = re.compile(r"[\wÀ-ÿ]+", re.UNICODE)
+_WS_RE = re.compile(r"\s+")
 
 
-def encode_sft(tok, jsonl_paths: list[Path], out_dir: Path, val_frac: float = 0.01,
-               max_len: int = 1024, min_val_tokens: int = 8192,
-               repeats: dict[str, int] | None = None):
-    """Tokenise les conversations avec un masque de loss (1 = réponse assistant)."""
+def _prompt_fingerprint(messages: list[dict]) -> bytes:
+    users = [str(m.get("text") or m.get("content") or "")
+             for m in messages if m.get("role") == "user"]
+    normalized = _WS_RE.sub(" ", "\n".join(users)).strip().casefold()
+    return hashlib.blake2b(normalized.encode("utf-8"), digest_size=12).digest()
+
+
+def _repetition_ratio(text: str, n: int = 4) -> float:
+    words = [w.casefold() for w in _WORDS_RE.findall(text)]
+    if len(words) < 80:
+        return 0.0
+    grams = [tuple(words[i:i + n]) for i in range(len(words) - n + 1)]
+    return 1.0 - len(set(grams)) / max(1, len(grams))
+
+
+def _prepare_sft_messages(record: dict, source: str) -> tuple[list[dict] | None, bytes | None, str | None]:
+    """Nettoie un exemple et raccourcit les traces de raisonnement trop longues.
+
+    Les longues traces Dolphin ne sont pas jetées : on garde leur réponse finale,
+    mais avec un bloc think vide ajouté plus tard par ``chat_segments``. Le modèle
+    profite ainsi de la couverture instructionnelle sans apprendre les monologues
+    qui ont provoqué les ``think-fleuves`` de la première v4.
+    """
+    cfg = SFT_RECIPE.get(source)
+    messages = record.get("m")
+    if cfg is None or not isinstance(messages, list):
+        return None, None, "messages_absents"
+    clean = []
+    user_chars = 0
+    stripped_think = False
+    n_user = n_assistant = 0
+
+    for message in messages:
+        role = message.get("role")
+        content = str(message.get("text") or message.get("content") or "").strip()
+        if role not in ("system", "user", "assistant") or not content:
+            continue
+        if role == "user":
+            n_user += 1
+            user_chars += len(content)
+        elif role == "assistant":
+            n_assistant += 1
+            opens = content.lower().count(THINK)
+            closes = content.lower().count(THINK_END)
+            blocks = _THINK_BLOCK_RE.findall(content)
+            if opens != closes or opens != len(blocks):
+                return None, None, "balises_think_invalides"
+            final = _THINK_BLOCK_RE.sub("", content).strip()
+            if not final:
+                return None, None, "reponse_finale_vide"
+            think_chars = sum(len(block.strip()) for block in blocks)
+            if blocks and think_chars > cfg["max_think"]:
+                content = final
+                stripped_think = True
+            if len(final) > cfg["max_final"]:
+                return None, None, "reponse_trop_longue"
+            if _repetition_ratio(final) > 0.35:
+                return None, None, "repetition"
+        clean.append({"role": role, "text": content})
+
+    if n_user == 0 or n_assistant == 0:
+        return None, None, "tour_manquant"
+    if user_chars > cfg["max_prompt"]:
+        return None, None, "prompt_trop_long"
+    return clean, _prompt_fingerprint(clean), "think_retire" if stripped_think else None
+
+
+def _allocate_sft_targets(source_reports: dict[str, dict], target_supervised: int) -> dict[str, int]:
+    weights = {s: SFT_RECIPE[s]["weight"] for s in source_reports}
+    weight_sum = sum(weights.values()) or 1.0
+    caps = {s: source_reports[s]["train_supervised"] * SFT_RECIPE[s]["max_repeat"]
+            for s in source_reports}
+    alloc = {s: min(caps[s], round(target_supervised * weights[s] / weight_sum))
+             for s in source_reports}
+
+    # Redistribue les quotas plafonnés (surtout le petit distillat) sans dépasser
+    # la répétition maximale de chaque source.
+    for _ in range(20):
+        missing = target_supervised - sum(alloc.values())
+        candidates = [s for s in alloc if alloc[s] < caps[s]]
+        if missing <= 0 or not candidates:
+            break
+        wsum = sum(weights[s] for s in candidates) or 1.0
+        progressed = 0
+        for source in candidates:
+            add = min(caps[source] - alloc[source],
+                      max(1, round(missing * weights[source] / wsum)))
+            alloc[source] += add
+            progressed += add
+        if progressed == 0:
+            break
+    return alloc
+
+
+def _copy_masked_shard(token_path: Path, mask_path: Path, writer: BinWriter,
+                       target_supervised: int, source_supervised: int,
+                       rotation: int = 0) -> tuple[int, int]:
+    """Copie/répète un shard jusqu'au quota supervisé, par blocs sans charger en RAM."""
+    if target_supervised <= 0 or source_supervised <= 0:
+        return 0, 0
+    tokens = np.memmap(token_path, dtype=DTYPE, mode="r")
+    masks = np.memmap(mask_path, dtype=np.uint8, mode="r")
+    copied_tokens = copied_sup = 0
+    chunk_size = 1_000_000
+    rotation %= max(1, len(tokens))
+
+    while copied_sup < target_supervised:
+        before_pass = copied_sup
+        # Une rotation propre à la source évite que les corpus sous-échantillonnés
+        # gardent systématiquement leur préfixe. Elle est stable entre deux builds.
+        ranges = ((rotation, len(tokens)), (0, rotation)) if rotation else ((0, len(tokens)),)
+        for range_start, range_end in ranges:
+            for start in range(range_start, range_end, chunk_size):
+                end = min(range_end, start + chunk_size)
+                m = np.asarray(masks[start:end])
+                remaining = target_supervised - copied_sup
+                chunk_sup = int(m.sum())
+                if chunk_sup > remaining:
+                    cutoff = int(np.searchsorted(np.cumsum(m, dtype=np.int64), remaining,
+                                                 side="left")) + 1
+                    end = start + cutoff
+                    m = np.asarray(masks[start:end])
+                    chunk_sup = int(m.sum())
+                writer.write(np.asarray(tokens[start:end]), m)
+                copied_tokens += end - start
+                copied_sup += chunk_sup
+                if copied_sup >= target_supervised:
+                    break
+            if copied_sup >= target_supervised:
+                break
+        if copied_sup == before_pass:  # filet contre un shard au masque vide/corrompu
+            break
+    del tokens, masks
+    return copied_tokens, copied_sup
+
+
+def encode_sft(tok, jsonl_paths: list[Path], out_dir: Path, max_len: int = 1024,
+               target_supervised: int = SFT_TARGET_SUPERVISED):
+    """Construit un SFT dédupliqué et pondéré par tokens de réponse assistant."""
     from tqdm import tqdm
 
-    if repeats is None:
-        repeats = {}
-        sizes = {p.stem: p.stat().st_size for p in jsonl_paths if p.exists()}
-        if "distill" in sizes:
-            autres = sum(v for k, v in sizes.items() if k != "distill")
-            reps = round(DISTILL_SHARE * autres / max(1, sizes["distill"]))
-            repeats["distill"] = int(min(16, max(1, reps)))
-            print(f"  [i] distill : ×{repeats['distill']} "
-                  f"(~{DISTILL_SHARE:.0%} du mix SFT visé)")
+    out_dir = Path(out_dir)
     eot = tok.token_to_id(EOT)
-    train_w = BinWriter(out_dir / "sft_train.bin", with_mask=True)
-    val_w = BinWriter(out_dir / "sft_val.bin", with_mask=True)
-    rng = random.Random(4321)
-    n_conv, n_sup = 0, 0
+    paths = {p.stem: p for p in jsonl_paths if p.exists() and p.stem in SFT_RECIPE}
+    ordered = [s for s in SFT_SOURCE_ORDER if s in paths]
+    seen_prompts: set[bytes] = set()
+    source_reports: dict[str, dict] = {}
 
-    for p in jsonl_paths:
-        reps = max(1, repeats.get(p.stem, 1))
-        desc = f"  sft {p.stem:14s}" + (f" (×{reps})" if reps > 1 else "")
-        for rec in tqdm(iter_jsonl(p), desc=desc, unit="conv", ncols=90):
-            msgs = rec.get("m")
-            if not msgs:
-                continue
-            ids: list[int] = []
-            mask: list[int] = []
-            for text, learn in chat_segments(msgs, ensure_think=True):
-                enc = tok.encode(text).ids
-                ids += enc
-                mask += [1 if learn else 0] * len(enc)
-            if len(ids) > max_len or sum(mask) == 0:
-                continue
-            ids.append(eot)
-            mask.append(0)
-            # train/val décidé AVANT répétition : un exemple va d'un seul côté,
-            # jamais des copies des deux (sinon la val est contaminée et flatte le score)
-            to_val = val_w.n < min_val_tokens or rng.random() < val_frac
-            if to_val:
-                val_w.write(ids, mask)
-            else:
-                for _ in range(reps):
-                    train_w.write(ids, mask)
-            n_conv += 1
-            n_sup += sum(mask)
+    with tempfile.TemporaryDirectory(prefix=".sft-build-", dir=out_dir) as tmp_name:
+        tmp = Path(tmp_name)
+        for source in ordered:
+            train_w = BinWriter(tmp / f"{source}_train.bin", with_mask=True)
+            val_w = BinWriter(tmp / f"{source}_val.bin", with_mask=True)
+            stats: dict[str, int] = {"read": 0, "kept": 0, "duplicates": 0,
+                                     "train_conversations": 0, "val_conversations": 0,
+                                     "train_supervised": 0, "val_supervised": 0}
+            rejected: dict[str, int] = {}
+            for record in tqdm(iter_jsonl(paths[source]), desc=f"  sft {source:14s}",
+                               unit="conv", ncols=90):
+                stats["read"] += 1
+                messages, fingerprint, note = _prepare_sft_messages(record, source)
+                if messages is None or fingerprint is None:
+                    rejected[note or "invalide"] = rejected.get(note or "invalide", 0) + 1
+                    continue
+                if fingerprint in seen_prompts:
+                    stats["duplicates"] += 1
+                    continue
+                seen_prompts.add(fingerprint)
 
-    out = {"conversations": n_conv, "train_tokens": train_w.n, "val_tokens": val_w.n,
-           "supervised_tokens": n_sup, "repeats": {k: v for k, v in repeats.items() if v > 1}}
-    train_w.close()
-    val_w.close()
-    return out
+                ids: list[int] = []
+                mask: list[int] = []
+                for text, learn in chat_segments(messages, ensure_think=True):
+                    enc = tok.encode(text).ids
+                    ids += enc
+                    mask += [1 if learn else 0] * len(enc)
+                supervised = sum(mask)
+                if len(ids) > max_len or supervised == 0:
+                    rejected["trop_de_tokens"] = rejected.get("trop_de_tokens", 0) + 1
+                    continue
+                ids.append(eot)
+                mask.append(0)
+                # Split stable par contenu : changer l'ordre des sources ne déplace
+                # jamais un exemple entre train et validation.
+                to_val = int.from_bytes(fingerprint[:8], "little") % 1000 < 5
+                writer = val_w if to_val else train_w
+                writer.write(ids, mask)
+                key = "val" if to_val else "train"
+                stats[f"{key}_conversations"] += 1
+                stats[f"{key}_supervised"] += supervised
+                stats["kept"] += 1
+                if note:
+                    rejected[note] = rejected.get(note, 0) + 1
+            train_w.close()
+            val_w.close()
+            stats["train_tokens_unique"] = (tmp / f"{source}_train.bin").stat().st_size // 2
+            stats["val_tokens_unique"] = (tmp / f"{source}_val.bin").stat().st_size // 2
+            stats["rejected_or_transformed"] = rejected
+            source_reports[source] = stats
+
+        allocations = _allocate_sft_targets(source_reports, int(target_supervised))
+        train_w = BinWriter(out_dir / "sft_train.bin", with_mask=True)
+        val_w = BinWriter(out_dir / "sft_val.bin", with_mask=True)
+        for source in ordered:
+            stats = source_reports[source]
+            rotation = int.from_bytes(hashlib.sha256(source.encode()).digest()[:8], "little")
+            train_tok, train_sup = _copy_masked_shard(
+                tmp / f"{source}_train.bin", tmp / f"{source}_train.mask", train_w,
+                allocations[source], stats["train_supervised"], rotation=rotation)
+            val_target = min(SFT_VAL_SUPERVISED_PER_SOURCE, stats["val_supervised"])
+            val_tok, val_sup = _copy_masked_shard(
+                tmp / f"{source}_val.bin", tmp / f"{source}_val.mask", val_w,
+                val_target, stats["val_supervised"])
+            stats.update({"target_supervised": allocations[source],
+                          "mixed_train_tokens": train_tok, "mixed_train_supervised": train_sup,
+                          "mixed_val_tokens": val_tok, "mixed_val_supervised": val_sup,
+                          "effective_repeat": round(train_sup / max(1, stats["train_supervised"]), 2)})
+        train_tokens, val_tokens = train_w.n, val_w.n
+        train_w.close()
+        val_w.close()
+
+    return {
+        "recipe": "v4.1-quality",
+        "target_supervised_tokens": int(target_supervised),
+        "train_tokens": train_tokens,
+        "val_tokens": val_tokens,
+        "supervised_tokens": sum(s["mixed_train_supervised"] for s in source_reports.values()),
+        "val_supervised_tokens": sum(s["mixed_val_supervised"] for s in source_reports.values()),
+        "sources": source_reports,
+    }
 
 
 # --------------------------------------------------------------------------------------
@@ -533,6 +734,18 @@ class BinCorpus:
         self.n_tokens = len(self.tokens)
         if self.n_tokens < seq_len + 1:
             raise ValueError(f"{bin_path} ne contient que {self.n_tokens} tokens (< seq_len+1)")
+        self.doc_starts = None
+        if self.mask is not None:
+            # En SFT, démarrer chaque fenêtre au début d'une conversation évite de
+            # superviser une réponse dont le prompt se trouve avant la fenêtre.
+            # EOT vaut 0 par invariant du tokenizer ; le scan par blocs borne la RAM.
+            starts = [np.array([0], dtype=np.int64)]
+            chunk_size = 10_000_000
+            for start in range(0, self.n_tokens, chunk_size):
+                chunk = np.asarray(self.tokens[start:start + chunk_size])
+                positions = np.flatnonzero(chunk == 0).astype(np.int64) + start + 1
+                starts.append(positions[positions < self.n_tokens - self.seq_len - 1])
+            self.doc_starts = np.concatenate(starts)
 
     def __len__(self):
         return self.n_tokens
@@ -542,7 +755,10 @@ class BinCorpus:
 
         rng = np.random.default_rng(seed * 1_000_003 + step)
         hi = self.n_tokens - self.seq_len - 1
-        offsets = rng.integers(0, hi, size=batch_size)
+        if self.doc_starts is not None:
+            offsets = rng.choice(self.doc_starts, size=batch_size)
+        else:
+            offsets = rng.integers(0, hi, size=batch_size)
 
         x = np.stack([self.tokens[o: o + self.seq_len] for o in offsets]).astype(np.int64)
         y = np.stack([self.tokens[o + 1: o + 1 + self.seq_len] for o in offsets]).astype(np.int64)
@@ -571,7 +787,8 @@ class BinCorpus:
 def prepare_all(data_dir: Path, target_tokens: int, vocab_size: int, mix: dict[str, float],
                 sft: bool = True, chars_per_token: float = 3.6, max_seq_len: int = 1024,
                 skip_download: bool = False, seed: int = 0,
-                mid_frac: float = 0.2) -> dict:
+                mid_frac: float = 0.2,
+                sft_target_supervised: int = SFT_TARGET_SUPERVISED) -> dict:
     """Prépare les trois phases : pretrain, midtrain (mid_frac du budget), SFT.
 
     mid_frac=0 désactive le midtrain. Le midtrain réutilise les jsonl déjà
@@ -606,17 +823,57 @@ def prepare_all(data_dir: Path, target_tokens: int, vocab_size: int, mix: dict[s
     print(f"\n[3/{n_steps}] Binarisation du pré-entraînement")
     report["pretrain"] = encode_pretrain(tok, paths, data_dir)
 
-    if mid_frac > 0:
-        print(f"\n[4/{n_steps}] Corpus de midtrain (recuit dense en raisonnement)")
-        build_mid(tok, data_dir, target_tokens, mid_frac, chars_per_token,
+    if sft:
+        # Préparer le SFT avant le mid rend alpaca/reasoning/gsm8k disponibles pour
+        # le shard instructionnel du mid. L'ordre de préparation ne change pas
+        # l'ordre d'entraînement : pretrain -> mid -> SFT reste obligatoire.
+        step = 4 if mid_frac > 0 else n_steps
+        print(f"\n[{step}/{n_steps}] Sources de dialogue + raisonnement, binarisation avec masque de loss")
+        build_sft(tok, data_dir, mix, max_seq_len, sft_target_supervised,
                   skip_download=skip_download, seed=seed, report=report)
 
-    if sft:
-        print(f"\n[{n_steps}/{n_steps}] Sources de dialogue + raisonnement, binarisation avec masque de loss")
-        build_sft(tok, data_dir, mix, max_seq_len,
+    if mid_frac > 0:
+        print(f"\n[{n_steps}/{n_steps}] Corpus de midtrain (recuit dense en raisonnement)")
+        build_mid(tok, data_dir, target_tokens, mid_frac, chars_per_token,
                   skip_download=skip_download, seed=seed, report=report)
     (data_dir / "meta.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     return report
+
+
+def build_mid_instruct(raw_dir: Path, out_path: Path, char_budget: int) -> dict:
+    """Crée un shard ChatML propre, dédupliqué et assez grand pour le midtrain."""
+    seen: set[bytes] = set()
+    counts: dict[str, int] = {}
+    rejected: dict[str, int] = {}
+    n_chars = n_docs = 0
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as stream:
+        for source in MID_INSTRUCT_SOURCES:
+            path = raw_dir / f"{source}.jsonl"
+            if not path.exists():
+                continue
+            for record in iter_jsonl(path):
+                messages, fingerprint, note = _prepare_sft_messages(record, source)
+                if messages is None or fingerprint is None:
+                    rejected[note or "invalide"] = rejected.get(note or "invalide", 0) + 1
+                    continue
+                if fingerprint in seen:
+                    rejected["doublon"] = rejected.get("doublon", 0) + 1
+                    continue
+                seen.add(fingerprint)
+                text = render_chat(messages)
+                if len(text) > 6000:
+                    rejected["document_trop_long"] = rejected.get("document_trop_long", 0) + 1
+                    continue
+                stream.write(json.dumps({"t": text}, ensure_ascii=False) + "\n")
+                counts[source] = counts.get(source, 0) + 1
+                n_docs += 1
+                n_chars += len(text)
+                if n_chars >= char_budget:
+                    return {"docs": n_docs, "chars": n_chars, "sources": counts,
+                            "rejected_or_transformed": rejected}
+    return {"docs": n_docs, "chars": n_chars, "sources": counts,
+            "rejected_or_transformed": rejected}
 
 
 def build_mid(tok, data_dir: Path, target_tokens: int, mid_frac: float,
@@ -635,19 +892,13 @@ def build_mid(tok, data_dir: Path, target_tokens: int, mid_frac: float,
             if not (skip_download and p.exists()):
                 from frlm import synth
                 synth.write_jsonl(p, budget_src, seed=seed + 101, mode="pretrain")
-        elif name == "distill":
-            # le "t" du distillat n'a pas les balises ChatML : on le re-rend depuis
-            # "m" pour que le mid voie le MÊME format que le SFT et le chat
-            src_p = raw_dir / "distill.jsonl"
-            if not src_p.exists():
-                print("  distill  : absent — tranche ignorée au mid")
-                continue
-            p = raw_dir / "distill_mid.jsonl"
-            with p.open("w", encoding="utf-8") as f:
-                for rec in iter_jsonl(src_p):
-                    if rec.get("m"):
-                        f.write(json.dumps({"t": render_chat(rec["m"])},
-                                           ensure_ascii=False) + "\n")
+        elif name == "instruct":
+            p = raw_dir / "mid_instruct.jsonl"
+            stats = build_mid_instruct(raw_dir, p, budget_src)
+            report["mid_instruct"] = stats
+            if stats["chars"] < budget_src:
+                print(f"  instruct : seulement {stats['chars']/1e6:.1f}M / "
+                      f"{budget_src/1e6:.1f}M caractères propres disponibles")
         else:
             p = raw_dir / f"{name}.jsonl"
             if not p.exists():
@@ -661,7 +912,9 @@ def build_mid(tok, data_dir: Path, target_tokens: int, mid_frac: float,
 
 
 def build_sft(tok, data_dir: Path, mix: dict[str, float] | None = None,
-              max_seq_len: int = 1024, skip_download: bool = False,
+              max_seq_len: int = 1024,
+              target_supervised: int = SFT_TARGET_SUPERVISED,
+              skip_download: bool = False,
               seed: int = 0, report: dict | None = None) -> dict:
     """Télécharge (si besoin) les sources SFT et construit sft_train.bin / sft_val.bin."""
     report = report if report is not None else {}
@@ -681,12 +934,14 @@ def build_sft(tok, data_dir: Path, mix: dict[str, float] | None = None,
     if not chat_paths:
         print("  (aucune source de dialogue téléchargée — SFT ignoré)")
     else:
-        report["sft"] = encode_sft(tok, chat_paths, Path(data_dir), max_len=max_seq_len)
+        report["sft"] = encode_sft(tok, chat_paths, Path(data_dir), max_len=max_seq_len,
+                                   target_supervised=target_supervised)
     return report
 
 
 def rebin_mid_sft(data_dir: Path, mid_frac: float = 0.2, max_seq_len: int = 1024,
-                  seed: int = 0) -> dict:
+                  seed: int = 0,
+                  sft_target_supervised: int = SFT_TARGET_SUPERVISED) -> dict:
     """Re-binarise UNIQUEMENT mid + SFT avec le tokenizer EXISTANT.
 
     À utiliser quand les recettes (MID_MIX, sur-échantillonnage, nouveau distill.jsonl)
@@ -713,6 +968,7 @@ def rebin_mid_sft(data_dir: Path, mid_frac: float = 0.2, max_seq_len: int = 1024
               skip_download=True, seed=seed, report=report)
     print("\n[2/2] Re-binarisation du SFT")
     build_sft(tok, data_dir, mix=meta.get("mix"), max_seq_len=max_seq_len,
+              target_supervised=sft_target_supervised,
               skip_download=True, seed=seed, report=report)
 
     meta.update(report)
