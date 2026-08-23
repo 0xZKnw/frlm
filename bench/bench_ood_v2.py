@@ -63,9 +63,9 @@ CONCURRENTS_V2 = [
 
 JOURS = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
 
-# type "num"   : dernier nombre de la réponse == attendu
-# type "choix" : première option mentionnée dans la réponse == attendu
-# type "regex" : motif présent dans la réponse
+# type "num"   : résultat numérique unique dans la conclusion finale
+# type "choix" : option unique dans une conclusion finale non ambiguë
+# type "regex" : motif présent dans la réponse finale
 PROBLEMES = [
     # ------------------------------------------------------------ transitif
     dict(cat="transitif", q="Léa est plus grande que Max. Max est plus grand que Zoé. Qui est le plus grand des trois ?",
@@ -196,23 +196,95 @@ def _dernier_nombre_v2(texte: str) -> str | None:
     return nombres[-1].replace(" ", "")
 
 
-def noter(prob: dict, texte: str) -> tuple[bool, str]:
-    """Note une réponse brute. Retourne (bon, réponse_extraite)."""
+def _nettoyer_sortie(texte: str) -> str:
+    texte = re.sub(r"<\|(?:im_start|im_end|endoftext)\|>", "\n", texte)
+    texte = re.sub(r"</?think>", "\n", texte, flags=re.IGNORECASE)
+    return texte.replace("\r", "\n").strip()
+
+
+def _zone_finale(texte: str) -> tuple[str, bool]:
+    """Isole une conclusion explicite, ou à défaut la dernière proposition.
+
+    Le benchmark ne récompense plus un nom ou un nombre seulement cité dans un
+    raisonnement contradictoire. Le booléen indique la présence d'un marqueur de
+    conclusion explicite.
+    """
+    texte = _nettoyer_sortie(texte)
+    marqueurs = list(re.finditer(
+        r"(?is)\b(?:réponse|reponse|conclusion)\s*[:：=-]",
+        texte,
+    ))
+    if marqueurs:
+        zone = texte[marqueurs[-1].end():].strip()
+        if zone:
+            return zone, True
+    lignes = [ligne.strip() for ligne in texte.splitlines() if ligne.strip()]
+    zone = lignes[-1] if lignes else texte
+    propositions = [part.strip() for part in re.split(r"(?<=[.!?])\s+", zone)
+                    if part.strip()]
+    zone = propositions[-1] if propositions else zone
+    donc = re.match(r"(?is)^donc\b\s*[:,]?\s*", zone)
+    return (zone[donc.end():] if donc else zone), bool(donc)
+
+
+def _option_mentions(texte: str, options: list[str]) -> list[str]:
+    normalise = _sans_accents(texte.casefold())
+    return [option for option in options if re.search(
+        r"(?<!\w)" + re.escape(_sans_accents(option.casefold())) + r"(?!\w)",
+        normalise,
+    )]
+
+
+def noter_strict(prob: dict, texte: str) -> dict:
+    """Retourne correct/incorrect/manual_review avec extraction auditable."""
+    zone, explicite = _zone_finale(texte)
     if prob["type"] == "num":
-        rep = _dernier_nombre_v2(texte)
-        return rep == prob["attendu"], repr(rep)
+        nombres = re.findall(r"(?<!\d)\d+(?:[ \u00a0\u202f]\d{3})*(?:,\d+)?(?!\d)", zone)
+        uniques = list(dict.fromkeys(n.replace(" ", "").replace("\u00a0", "")
+                                    .replace("\u202f", "") for n in nombres))
+        if len(uniques) != 1:
+            return {"status": "manual_review" if uniques else "incorrect",
+                    "extracted": repr(uniques), "zone": zone,
+                    "reason": "numeric_final_ambiguous" if uniques else "numeric_final_missing"}
+        rep = uniques[0]
+        return {"status": "correct" if rep == prob["attendu"] else "incorrect",
+                "extracted": repr(rep), "zone": zone, "reason": "numeric_final_unique"}
     if prob["type"] == "regex":
-        ok = re.search(prob["attendu"], texte, re.IGNORECASE) is not None
-        # un nombre inventé fait échouer même si le motif « 0 » traîne quelque part
-        return ok, texte.strip()[:60]
-    # "choix" : la PREMIÈRE option mentionnée est considérée comme la réponse du modèle
-    t = _sans_accents(texte.lower())
-    premier, pos = None, len(t) + 1
-    for opt in prob["options"]:
-        m = re.search(r"(?<!\w)" + re.escape(_sans_accents(opt.lower())), t)
-        if m and m.start() < pos:
-            premier, pos = opt, m.start()
-    return premier == prob["attendu"], repr(premier)
+        ok = re.search(prob["attendu"], zone, re.IGNORECASE) is not None
+        return {"status": "correct" if ok else "incorrect",
+                "extracted": zone[:60], "zone": zone, "reason": "regex_final"}
+
+    mentions = _option_mentions(zone, prob["options"])
+    if len(mentions) != 1:
+        return {"status": "manual_review" if len(mentions) > 1 else "incorrect",
+                "extracted": repr(mentions), "zone": zone,
+                "reason": "choice_final_ambiguous" if mentions else "choice_final_missing"}
+    rep = mentions[0]
+    conclusion_naturelle = bool(re.search(
+        r"(?i)(?:c['’]est|il s['’]agit de|\best\s+(?:le|la)\s+plus|\bobtient\s+le\s+plus)",
+        zone,
+    ))
+    sortie_courte = len(zone.split()) <= 4
+    if not (explicite or conclusion_naturelle or sortie_courte):
+        return {"status": "manual_review", "extracted": repr(rep), "zone": zone,
+                "reason": "choice_without_conclusion"}
+    return {"status": "correct" if rep == prob["attendu"] else "incorrect",
+            "extracted": repr(rep), "zone": zone, "reason": "choice_final_unique"}
+
+
+def noter(prob: dict, texte: str) -> tuple[bool, str]:
+    """Compatibilité : seul le statut strict `correct` vaut un point automatique."""
+    result = noter_strict(prob, texte)
+    return result["status"] == "correct", result["extracted"]
+
+
+def noter_fait(motif: str, texte: str) -> dict:
+    """Note seulement la première proposition d'une complétion factuelle."""
+    propre = _nettoyer_sortie(texte)
+    premiere = re.split(r"(?:\n|(?<=[.!?])\s+)", propre, maxsplit=1)[0].strip()
+    ok = re.search(motif, premiere, re.IGNORECASE) is not None
+    return {"status": "correct" if ok else "incorrect", "extracted": premiere[:100],
+            "zone": premiere, "reason": "fact_first_proposition"}
 
 
 class ModeleHFInstruct(ModeleHF):
@@ -288,6 +360,7 @@ def main():
     def evaluer(m):
         t0 = time.time()
         par_cat = {c: [0, 0] for c in CATS}
+        reviews = {c: 0 for c in CATS}
         err_affichee = False   # 1re exception montrée en clair, les suivantes avalées
         for problem_index, prob in enumerate(PROBLEMES):
             try:
@@ -299,16 +372,22 @@ def main():
                     print(f"[!] {m.nom} — exception sur {prob['q']!r} :")
                     traceback.print_exc()
                     err_affichee = True
-            bon, rep = noter(prob, brut)
+            scoring = noter_strict(prob, brut)
+            bon = scoring["status"] == "correct"
+            rep = scoring["extracted"]
             par_cat[prob["cat"]][0] += bon
             par_cat[prob["cat"]][1] += 1
+            reviews[prob["cat"]] += int(scoring["status"] == "manual_review")
             details.append((m.nom, prob["cat"], prob["q"], str(prob["attendu"]),
-                            f"{rep} · texte : {brut.strip()[:200]}", bon))
+                            f"{rep} · statut : {scoring['status']} · "
+                            f"zone : {scoring['zone'][:100]} · texte : {brut.strip()[:200]}", bon))
             raw_records.append({
                 "model": m.nom, "section": "reasoning", "item_index": problem_index,
                 "category": prob["cat"], "prompt": prob["q"],
                 "expected": str(prob["attendu"]), "extracted": rep,
                 "raw_answer": brut, "auto_correct": bool(bon),
+                "auto_status": scoring["status"], "auto_reason": scoring["reason"],
+                "final_zone": scoring["zone"],
             })
 
         ok_faits = 0
@@ -322,19 +401,22 @@ def main():
                     print(f"[!] {m.nom} — exception sur le fait {amorce!r} :")
                     traceback.print_exc()
                     err_affichee = True
-            bon = re.search(motif, gen, re.IGNORECASE) is not None
+            scoring = noter_fait(motif, gen)
+            bon = scoring["status"] == "correct"
             ok_faits += bon
-            details.append((m.nom, "fait", amorce, motif, gen.strip()[:100], bon))
+            details.append((m.nom, "fait", amorce, motif,
+                            f"{scoring['extracted']} · texte : {gen.strip()[:100]}", bon))
             raw_records.append({
                 "model": m.nom, "section": "facts", "item_index": fact_index,
                 "category": "fait", "prompt": amorce, "expected": motif,
-                "extracted": gen.strip()[:100], "raw_answer": gen,
-                "auto_correct": bool(bon),
+                "extracted": scoring["extracted"], "raw_answer": gen,
+                "auto_correct": bool(bon), "auto_status": scoring["status"],
+                "auto_reason": scoring["reason"], "final_zone": scoring["zone"],
             })
 
         total_ok = sum(v[0] for v in par_cat.values())
         scores = " · ".join(f"{c} {v[0]}/{v[1]}" for c, v in par_cat.items())
-        lignes.append((m.nom, par_cat, total_ok, ok_faits))
+        lignes.append((m.nom, par_cat, total_ok, ok_faits, reviews))
         print(f"{m.nom:<44} {scores}\n{'':<44} total {total_ok}/{len(PROBLEMES)} "
               f"· faits {ok_faits}/{len(FAITS)}  ({time.time()-t0:.0f}s)")
 
@@ -373,16 +455,20 @@ def main():
         f.write("⚠️ Ces énoncés ne doivent jamais entrer dans un corpus d'entraînement.\n\n")
         f.write("| modèle | " + " | ".join(CATS) + " | total | faits |\n")
         f.write("|---" * (len(CATS) + 3) + "|\n")
-        for nom, pc, tot, faits in lignes:
+        for nom, pc, tot, faits, reviews in lignes:
             cases = " | ".join(f"{pc[c][0]}/{pc[c][1]}" for c in CATS)
             f.write(f"| {nom} | {cases} | **{tot}/{len(PROBLEMES)}** | {faits}/{len(FAITS)} |\n")
+            pending = sum(reviews.values())
+            if pending:
+                f.write(f"\n> {pending} réponse(s) `manual_review` comptée(s) fausse(s) "
+                        "dans le total automatique strict.\n")
         f.write("\n## Détails\n\n")
         for nom, cat, q, attendu, obtenu, bon in details:
             f.write(f"- {'✅' if bon else '❌'} `{cat}` **{nom}** — {q!r} → "
                     f"attendu {attendu!r}, obtenu {obtenu!r}\n")
     raw_path = rap.with_suffix(".raw.json")
     raw_path.write_text(json.dumps({
-        "schema": "frlm-ood-v2-raw-1", "created_unix": time.time(),
+        "schema": "frlm-ood-v2-raw-2-strict", "created_unix": time.time(),
         "run": a.run, "stage": a.stage, "checkpoint": a.ckpt,
         "records": raw_records,
     }, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -1,0 +1,401 @@
+{
+  "schema": "frlm-reason-bootstrap-profile-1",
+  "model": {
+    "checkpoint": "runs\\fr-v4-v45-sft\\sft\\ckpt_best.pt",
+    "step": 736,
+    "phase": "sft",
+    "protocol": "chat",
+    "dtype": "torch.bfloat16"
+  },
+  "settings": {
+    "splits": [
+      "iid",
+      "surface_holdout",
+      "structure_holdout"
+    ],
+    "tasks_per_split": 5,
+    "k": 2,
+    "max_new": 64,
+    "seed": 455532
+  },
+  "elapsed_seconds": 62.62,
+  "metrics": {
+    "iid": {
+      "tasks": 5,
+      "greedy": 0,
+      "pass_k": 0,
+      "samples": 10,
+      "sample_success": 0,
+      "greedy_rate": 0.0,
+      "pass@2": 0.0,
+      "sample_success_rate": 0.0
+    },
+    "macro": {
+      "tasks": 15,
+      "greedy": 0,
+      "pass_k": 0,
+      "samples": 30,
+      "sample_success": 0,
+      "greedy_rate": 0.0,
+      "pass@2": 0.0,
+      "sample_success_rate": 0.0
+    },
+    "objective:execute": {
+      "tasks": 3,
+      "greedy": 0,
+      "pass_k": 0,
+      "samples": 6,
+      "sample_success": 0,
+      "greedy_rate": 0.0,
+      "pass@2": 0.0,
+      "sample_success_rate": 0.0
+    },
+    "objective:find_error": {
+      "tasks": 4,
+      "greedy": 0,
+      "pass_k": 0,
+      "samples": 8,
+      "sample_success": 0,
+      "greedy_rate": 0.0,
+      "pass@2": 0.0,
+      "sample_success_rate": 0.0
+    },
+    "objective:masked_step": {
+      "tasks": 5,
+      "greedy": 0,
+      "pass_k": 0,
+      "samples": 10,
+      "sample_success": 0,
+      "greedy_rate": 0.0,
+      "pass@2": 0.0,
+      "sample_success_rate": 0.0
+    },
+    "objective:number_only": {
+      "tasks": 1,
+      "greedy": 0,
+      "pass_k": 0,
+      "samples": 2,
+      "sample_success": 0,
+      "greedy_rate": 0.0,
+      "pass@2": 0.0,
+      "sample_success_rate": 0.0
+    },
+    "objective:order_steps": {
+      "tasks": 2,
+      "greedy": 0,
+      "pass_k": 0,
+      "samples": 4,
+      "sample_success": 0,
+      "greedy_rate": 0.0,
+      "pass@2": 0.0,
+      "sample_success_rate": 0.0
+    },
+    "structure_holdout": {
+      "tasks": 5,
+      "greedy": 0,
+      "pass_k": 0,
+      "samples": 10,
+      "sample_success": 0,
+      "greedy_rate": 0.0,
+      "pass@2": 0.0,
+      "sample_success_rate": 0.0
+    },
+    "surface_holdout": {
+      "tasks": 5,
+      "greedy": 0,
+      "pass_k": 0,
+      "samples": 10,
+      "sample_success": 0,
+      "greedy_rate": 0.0,
+      "pass@2": 0.0,
+      "sample_success_rate": 0.0
+    }
+  },
+  "details": [
+    {
+      "id": "d3579afd442d27f4282b",
+      "split": "iid",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": false,
+      "greedy_text": "Pour identifier l'erreur, nous devons suivre les étapes données et vérifier si elles sont dans l'ordre.\n\n1. **Étape 1 :** \"r1 = 2 × 5 = 9\"\n   - Erreur : 2 × 5 = 10\n\n",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Pour identifier la première étape fausse, nous devons identifier la première étape qui n'a pas de valeur numérique ou qui est 1, 2 ou 3.\n\n1. **Étape 1 : \\( r1 = 2 \\times 5 = 10 \\)**\n\n2. "
+        },
+        {
+          "ok": false,
+          "text": "Pour résoudre ce problème, nous devons identifier la première étape fausse : `r1 = 2 × 5 = 10`. Ensuite, `r2 = r1 + 8 = 18`.\n\nCalculons les deux premières étapes :\n\n1. `r1 = "
+        }
+      ]
+    },
+    {
+      "id": "af29c5be6e2c20f8ff06",
+      "split": "iid",
+      "objective": "masked_step",
+      "target": "-24",
+      "greedy_ok": false,
+      "greedy_text": "Pour masquer l'étape 1 de l'instruction `r1`, nous devons identifier les parties de l'instruction qui ne sont pas `MASQUÉ`.\n\nVoici l'analyse de l'étape 1 :\n\n- `[MASQUÉ]` est une instruction",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Pour masquer l'étape 1 de la séquence `[MASQUÉ]`, suivez ces étapes :\n\n1. **Diviser par 2** : Prenez le premier nombre de 0 et divisez-le par 2.\n\n2. **Ajouter 2** : Prenez"
+        },
+        {
+          "ok": false,
+          "text": "Pour masquer le résultat, on peut utiliser la formule :\n\n\\[ \\text{Résultat masqué} = \\frac{(-8 - M)(-8)}{2} \\]\n\noù \\( M \\) est la masse en g, et \\( \\"
+        }
+      ]
+    },
+    {
+      "id": "7ddd90e5b0200883005b",
+      "split": "iid",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": false,
+      "greedy_text": "La première étape fausse est \\( r1 = 30 + 4 = 34 \\).<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "La première étape fausse est r2 = 31.\n\nEnsuite, on soustrait 4 et on trouve le nombre de fois où l'erreur apparaît :\n\n\\( r = \\left(31\\right)^2 \\right) \\)\n\nDonc, r = 3"
+        },
+        {
+          "ok": false,
+          "text": "La première étape fausse est \\( r1 = 30 + 4 = 34 \\).<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "94442c6cebad3a268adc",
+      "split": "iid",
+      "objective": "find_error",
+      "target": "2",
+      "greedy_ok": false,
+      "greedy_text": "Pour identifier l'erreur, nous devons déterminer le numéro de la première étape fausse en utilisant les valeurs données :\n\nÉtape 1 : \"r1 = 3 + 3 = 6\"\nÉtape 2 : \"r2 = r1 − 2 = 1\"\nÉtape ",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Pour identifier l'erreur, il faut déterminer les valeurs de r1 et r2.\n\nÉtape 1 : `r1 = 3`\nÉtape 2 : `r2 = r1`\nÉtape 3 : `r3 = r1`\n\nDonc :\n\n- `r"
+        },
+        {
+          "ok": false,
+          "text": "Pour identifier l'erreur, nous devons suivre ces étapes :\n\n1. Calculer l'indice de la première étape.\n2. Utiliser la formule de calcul pour le calcul des indices de fausses valeurs.\n\nL'étape 1 est : \\( r1 = 3 + 3 = "
+        }
+      ]
+    },
+    {
+      "id": "bf12be68a6096a661151",
+      "split": "iid",
+      "objective": "masked_step",
+      "target": "-3",
+      "greedy_ok": false,
+      "greedy_text": "Pour masquer le résultat masqué, nous devons d'abord identifier les valeurs possibles de \\( r \\).\n\nLe résultat masqué est \\( r1 = 6 \\) − 3 = -6 \\).\n\nAinsi, \\( r1 = 6 \\) �",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Pour trouver la valeur de \\( r \\), \\( r2 \\) et \\( r3 \\), sachant que \\( r1 > 9 > 3 \\), nous pouvons procéder ainsi :\n\n1. Calculer \\( r1 \\) :  \n   \\[ r1 ="
+        },
+        {
+          "ok": false,
+          "text": "Pour trouver la séquence \\( r1 \\) et \\( r2 \\), nous devons d'abord calculer \\( r1 \\).\n\nCalculons \\( r1 \\):\n\n\\[\nr1 = \\left(\\frac{6}{2}\\right)"
+        }
+      ]
+    },
+    {
+      "id": "55c18434c25d3498558a",
+      "split": "surface_holdout",
+      "objective": "number_only",
+      "target": "5",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n7 augmenté de -7<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n -7 - 5 = -4<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n7 − 5 = 2\n</think>\n7 − 5 = 2<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "d39abb33dfcec9477ed4",
+      "split": "surface_holdout",
+      "objective": "execute",
+      "target": "-19",
+      "greedy_ok": false,
+      "greedy_text": "<think> -13 + -6 = 9.<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think> -13 + -6 = 19.\n ajouter 19<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think> -13 + -6 = 9.<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "5fbc9018868f49f3b753",
+      "split": "surface_holdout",
+      "objective": "order_steps",
+      "target": "A",
+      "greedy_ok": false,
+      "greedy_text": "Pour résoudre cette étape, commençons par identifier les lettres séparées par des virgules :\n\n- Étape 1 : r1 = 8 + -4 = -8\n- Étape 2 : r = 8 + -4 = -6\n- Étape 3 : r = ",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Pour résoudre cette étape, commençons par identifier les lettres séparées par des virgules. \n\nLes étapes sont :\n1. `A`\n2. `E`\n3. `D`\n\nCalculons chacune d'elles :\n\n- `A` contient 1 lettre."
+        },
+        {
+          "ok": false,
+          "text": "Pour résoudre cette étape, nous devons suivre les étapes données :\n\n1. Étape 1 : \\( r1 = 8 + -4 = 8\\)\n2. Étape 2 : \\( \\frac{A}{2} = 8 \\)\n3. Étape"
+        }
+      ]
+    },
+    {
+      "id": "c58ab6ac43b3de109070",
+      "split": "surface_holdout",
+      "objective": "find_error",
+      "target": "2",
+      "greedy_ok": false,
+      "greedy_text": "Pour identifier l'erreur, nous devons d'abord déterminer la valeur de \\( r \\).\n\nLa première étape fausse est \\( r1 = 6 \\times 2 = 12 \\).\n\nEnsuite, nous devons vérifier si cette valeur est égale à 12 :\n\n\\",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Pour identifier l'erreur, nous devons déterminer le coefficient du calcul, qui est \\(\\binom{8}{2}\\), où \\(\\binom{}{2}\\) représente le produit des coefficients \\(a\\), \\(b\\) et \\(c\\)."
+        },
+        {
+          "ok": false,
+          "text": "Pour identifier la première étape fausse, on utilise le numéro de la première étape fausse :\n\nÉtape 1 : \\( r1 = 6 \\) × 2 = 12\n\nCela signifie que la première étape fausse est \\( r1 = 6 \\) et l'étape suivante"
+        }
+      ]
+    },
+    {
+      "id": "ac5030eb7cae95f405d8",
+      "split": "surface_holdout",
+      "objective": "execute",
+      "target": "32",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n1. Calcule la quantité de 6 à partir de 6.\n2. Divise cette quantité par 2 pour obtenir 8.\n3. Combine 8 avec 6 pour obtenir 9.\n4. Divise 8 par  2 pour obtenir 10.",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n1. Calcule la quantité 6.\n2. Additionne les deux quantités pour obtenir 6+2=8.\n3. Divise 8 par 3 pour isoler le nombre.\n4. Ensuite, multiplie 8 par 3 pour trouver le nombre final.<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1. Calcule la quantité de 6 qu'on retire.\n2. On conserve donc 6 qu'on met dans 2 casiers.\n3. On laisse le casier vide pendant \\( \\frac{6}{2} \\) jours.\n4. Après \\"
+        }
+      ]
+    },
+    {
+      "id": "0ccded32fb366e00b9af",
+      "split": "structure_holdout",
+      "objective": "order_steps",
+      "target": "A,B",
+      "greedy_ok": false,
+      "greedy_text": "Pour résoudre cette tâche, nous devons identifier les lettres séparées par des virgules dans l'ordre inverse.\n\n1. Étape 1 : r1 = 3 − 2 = 1\n2. Étape 2 : r2 = 26 − r1 = ",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Pour résoudre cette tâche, nous devons identifier et localiser les lettres séparées par des virgules dans l'ordre d'exécution.\n\nVoici les étapes détaillées pour résoudre cette étape :\n\n1. Identifier la première lettre de chaque phrase dans l'ordre correct.\n2. Identifier l'ordre"
+        },
+        {
+          "ok": false,
+          "text": "- Étape 1 : r1 = 3 − 2 = 1\n- Étape 2 : r2 = 26 − r1 = 25\n- Étape 3 : r3 = 26 − r2 = 25\n"
+        }
+      ]
+    },
+    {
+      "id": "866f972996a6696465c9",
+      "split": "structure_holdout",
+      "objective": "masked_step",
+      "target": "40",
+      "greedy_ok": false,
+      "greedy_text": "Pour masquer le résultat masqué, nous devons identifier les éléments qui ne sont pas dans l'ordre correct.\n\nÉtape 1 : r1 = 4 × 9 = 36\nÉtape 2 : r2 = 4 − 8 = -4\nÉtape 3",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Pour masquer le résultat masqué, nous devons identifier les deux premières opérations sur \\( r1 \\) et \\( r2 \\).\n\n1. \\( r1 = 4 \\)\n2. \\( r2 = -4 \\)\n\nAnalysons cela étape par étape :\n\n"
+        },
+        {
+          "ok": false,
+          "text": "Pour masquer correctement la séquence \\( \\{ 1, 2, 3, 4, 5 \\} \\), on utilise la méthode de la séquence.\n\n- \\( r1 \\) est la séquence initiale.\n- \\( r2 \\) est la séquence finale masquée"
+        }
+      ]
+    },
+    {
+      "id": "c21af25dec88c1010ddd",
+      "split": "structure_holdout",
+      "objective": "masked_step",
+      "target": "324",
+      "greedy_ok": false,
+      "greedy_text": "Pour masquer le résultat masqué, nous devons d'abord identifier les valeurs possibles de \\( r \\).\n\nLa première sous-valeurs possibles de \\( r \\) sont \\( 4 \\) et \\( 6 \\).\n\nEnsuite, nous devons identifier les valeurs possibles de",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Pour masquer le résultat masqué, nous procédons comme suit :\n\n1. Calculer \\( r1 \\) et \\( r2 \\).\n2. \\( r1 = 4 + 2 = 6 \\).\n3. \\( r2 = 6 × 9"
+        },
+        {
+          "ok": false,
+          "text": "Pour masquer cette séquence, nous pouvons la comparer au mastication d'une orange.\n\nSupposons que \\( r1 = 4 + 2 = 6 \\) et \\( r2 = 6 × 9 = 54 \\).\n\n\\[ \\tex"
+        }
+      ]
+    },
+    {
+      "id": "66851f377dbe3d6b373b",
+      "split": "structure_holdout",
+      "objective": "execute",
+      "target": "64",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n6 × 8 - 7 = 11.\n9 − 7 = 2\n</think>\n\nLa somme de 6 fois 8 et 9 moins -7 est 2.<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n9 - 7 = 2.\n2 × 7 = 14\n</think>\n</think><|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "c55bc7ad76a20aa12ffa",
+      "split": "structure_holdout",
+      "objective": "masked_step",
+      "target": "2",
+      "greedy_ok": false,
+      "greedy_text": "Pour masquer le résultat masqué, nous devons identifier les valeurs possibles de \\( r \\).\n\nÉtape 1 : \\( r1 = 5 \\)\n\\[\nr1 = 5 \\times 6 = 30\n\\]\n\nÉtape 2 : \\( r",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Pour masquer la séquence \\( \\{1, 2, 3\\} \\), nous allons supposer que \\( \\mathbb{Z} \\) est le cercle complet avec \\( u = x \\) et \\( y = xy \\).\n\nL'exécution \\("
+        },
+        {
+          "ok": false,
+          "text": "Pour masquer correctement la séquence \\( \\{ e \\} \\) dans l'exécution \\( \\{ e, b, c, d, e, f, g \\} \\), nous devons identifier l'élément \\( e \\).\n\n1. Comparer chaque élément à la séquence masquée :"
+        }
+      ]
+    }
+  ]
+}

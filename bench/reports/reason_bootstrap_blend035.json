@@ -1,0 +1,926 @@
+{
+  "schema": "frlm-reason-bootstrap-profile-1",
+  "model": {
+    "checkpoint": "runs\\fr-v4-v45-reason\\sft\\ckpt_blend035.pt",
+    "step": 120,
+    "phase": "sft",
+    "protocol": "chat",
+    "dtype": "torch.bfloat16"
+  },
+  "settings": {
+    "splits": [
+      "iid",
+      "surface_holdout",
+      "structure_holdout"
+    ],
+    "tasks_per_split": 10,
+    "k": 4,
+    "max_new": 64,
+    "seed": 455532
+  },
+  "elapsed_seconds": 81.83,
+  "metrics": {
+    "iid": {
+      "tasks": 10,
+      "greedy": 3,
+      "pass_k": 3,
+      "samples": 40,
+      "sample_success": 10,
+      "greedy_rate": 0.3,
+      "pass@4": 0.3,
+      "sample_success_rate": 0.25
+    },
+    "macro": {
+      "tasks": 30,
+      "greedy": 5,
+      "pass_k": 7,
+      "samples": 120,
+      "sample_success": 19,
+      "greedy_rate": 0.16666666666666666,
+      "pass@4": 0.23333333333333334,
+      "sample_success_rate": 0.15833333333333333
+    },
+    "objective:execute": {
+      "tasks": 6,
+      "greedy": 0,
+      "pass_k": 0,
+      "samples": 24,
+      "sample_success": 0,
+      "greedy_rate": 0.0,
+      "pass@4": 0.0,
+      "sample_success_rate": 0.0
+    },
+    "objective:find_error": {
+      "tasks": 9,
+      "greedy": 5,
+      "pass_k": 6,
+      "samples": 36,
+      "sample_success": 18,
+      "greedy_rate": 0.5555555555555556,
+      "pass@4": 0.6666666666666666,
+      "sample_success_rate": 0.5
+    },
+    "objective:masked_step": {
+      "tasks": 7,
+      "greedy": 0,
+      "pass_k": 0,
+      "samples": 28,
+      "sample_success": 0,
+      "greedy_rate": 0.0,
+      "pass@4": 0.0,
+      "sample_success_rate": 0.0
+    },
+    "objective:number_only": {
+      "tasks": 4,
+      "greedy": 0,
+      "pass_k": 0,
+      "samples": 16,
+      "sample_success": 0,
+      "greedy_rate": 0.0,
+      "pass@4": 0.0,
+      "sample_success_rate": 0.0
+    },
+    "objective:order_steps": {
+      "tasks": 4,
+      "greedy": 0,
+      "pass_k": 1,
+      "samples": 16,
+      "sample_success": 1,
+      "greedy_rate": 0.0,
+      "pass@4": 0.25,
+      "sample_success_rate": 0.0625
+    },
+    "structure_holdout": {
+      "tasks": 10,
+      "greedy": 1,
+      "pass_k": 1,
+      "samples": 40,
+      "sample_success": 3,
+      "greedy_rate": 0.1,
+      "pass@4": 0.1,
+      "sample_success_rate": 0.075
+    },
+    "surface_holdout": {
+      "tasks": 10,
+      "greedy": 1,
+      "pass_k": 3,
+      "samples": 40,
+      "sample_success": 6,
+      "greedy_rate": 0.1,
+      "pass@4": 0.3,
+      "sample_success_rate": 0.15
+    }
+  },
+  "details": [
+    {
+      "id": "d3579afd442d27f4282b",
+      "split": "iid",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": true,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "af29c5be6e2c20f8ff06",
+      "split": "iid",
+      "objective": "masked_step",
+      "target": "-24",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n\nL'instruction `-8` est utilisée pour r1 = -8 × 3 = 24, et `-9` est utilisée pour r1 = -9 × 3 = 2. Ainsi, la longueur de l'instruction est de 24 caractères.<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "-1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "**Résultat masqué :** -8<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Pour obtenir la moitié de l'entier \\(\\mathbb{R}\\), on applique la propriété des nombres complexes où \\(n \\neq 1\\).\n\n- \\(2^3 = 9\\) (la valeur maximale)\n- \\(3^4 ="
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -8<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "7ddd90e5b0200883005b",
+      "split": "iid",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": false,
+      "greedy_text": "16<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "161<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "171<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "16<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "16<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "94442c6cebad3a268adc",
+      "split": "iid",
+      "objective": "find_error",
+      "target": "2",
+      "greedy_ok": false,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "bf12be68a6096a661151",
+      "split": "iid",
+      "objective": "masked_step",
+      "target": "-3",
+      "greedy_ok": false,
+      "greedy_text": "Étape 1 : r1 = 6 − 9 = [MASQUÉ]\n\nL'instruction `r1 = 6 − 3 = -3` est une soustraction de deux entiers, ce qui donne `r2 = r1 − 3",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "**Étape 2 : r3 = -6**<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : 3<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "**Étape 1 :** r1 = 6 − 9 = [MASQUÉ]\n\nL'expression \\( r1 \\) représente la somme des valeurs de \\( x \\), \\( y \\) et \\( z \\) pour \\( \\MASQUÉ"
+        },
+        {
+          "ok": false,
+          "text": "Pour trouver la décomposition de \\(\\mathbb{N}\\) dans \\(\\mathbb{N}\\), nous devons d'abord identifier les sous-ensembles possibles de \\(\\mathbb{N}\\) obtenus à l'étape 1.\n"
+        }
+      ]
+    },
+    {
+      "id": "af55da3a4090474ce907",
+      "split": "iid",
+      "objective": "execute",
+      "target": "-80",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n100<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n100<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n100<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n100<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n\n1. Multiplier par 4 donne 4.\n2. Diviser par 2 donne 1.\n3. Ajouter 10 pour la étape finale.<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "7583713c8349dcb8493b",
+      "split": "iid",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": true,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Pour identifier la première étape fausse, il faut d'abord déterminer la valeur de \\( r \\).\n\nÉtape 1 : Calcule la première étape correcte.\n- \\( r1 = -8 \\times 7 = -57 \\)\n\n1\n\n2\n\n3\n\n4\n\n5\n\n"
+        },
+        {
+          "ok": false,
+          "text": "Pour identifier l'erreur de calcul, on peut suivre les étapes suivantes :\n\n1. Calculer \\( r1 \\) et \\( r2 \\).\n2. Soustraire \\( r1 de \\leq r2 \\) pour obtenir \\( r1 - r2 = 4 \\)."
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "1f8db7bad23677e3de28",
+      "split": "iid",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": true,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "cd3130de0b3a0f34489d",
+      "split": "iid",
+      "objective": "number_only",
+      "target": "7",
+      "greedy_ok": false,
+      "greedy_text": "19<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "9<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "19<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "19<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "19<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "352fe121f89d6422a6b1",
+      "split": "iid",
+      "objective": "execute",
+      "target": "-7",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n- **-3** :-5\n- **-4** :-7\n- **-5** :-5<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n- 0 :-3\n- 1 :-4\n</think>\n- 1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n -3 − -4 = -1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n-3 − -4 = -8<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n- 1 - 0 - 4\n- -3 - 4 - -7\n- -3\n</think>\n</think><|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "55c18434c25d3498558a",
+      "split": "surface_holdout",
+      "objective": "number_only",
+      "target": "5",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n -7<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n-7\n</think>\n--7<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n7 augmenté de -7<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n -5<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n -7<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "d39abb33dfcec9477ed4",
+      "split": "surface_holdout",
+      "objective": "execute",
+      "target": "-19",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n -13 + -6 = 9\n\nTreize moins  font 9.<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n -13 + -6 = 9.\n + 9 = 18<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n -13 + -6 = 9<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n -13 + -6 = 9\n\nTre part avec 9 coquillages.<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n -13 + -6 = 9\n\nTade a 9 coquillages.<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "5fbc9018868f49f3b753",
+      "split": "surface_holdout",
+      "objective": "order_steps",
+      "target": "A",
+      "greedy_ok": false,
+      "greedy_text": "lème : EA<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think> de A à B. r1 = 4<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "A, Étape 2 : r2 = 8 + -4 = 3<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "12<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "A<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "c58ab6ac43b3de109070",
+      "split": "surface_holdout",
+      "objective": "find_error",
+      "target": "2",
+      "greedy_ok": false,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": false,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "2<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "ac5030eb7cae95f405d8",
+      "split": "surface_holdout",
+      "objective": "execute",
+      "target": "32",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n1. on met 6 on obtient 6\n2. on ajoute 2 on obtient 2*6=12\n3. on donne 12 on obtient 12\n\n</think>\n1<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n1. On met 6 boîtes de 8 onces dans un bol.\n2. On enlève 2 boîtes, donc le bol en ajoute 4.\n3. On laisse reposer pendant 1 heure.\n4. Enfin, on ajoute 2 cuillères à soupe de lait pour le petit"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n14<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "54d7dd4cc775becd7ffe",
+      "split": "surface_holdout",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": false,
+      "greedy_text": "10<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "10<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "10<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "10<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "10<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "733e223b6f0f4c0a0374",
+      "split": "surface_holdout",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": true,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "6c3ac500a29a7079fe08",
+      "split": "surface_holdout",
+      "objective": "masked_step",
+      "target": "30",
+      "greedy_ok": false,
+      "greedy_text": "Réponse : 3<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Étape 1 : r1 = 8 × 4 = 32\nÉtape 2 : r2 = r1 − 2 = [MASQUÉ]\n\nLa première étape est donc \\( r1 \\) et la deuxième est \\( r2 \\).<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Étape 1 : r1 = 8 × 4 = 32\nÉtape 2 : r2 = r1 − 2 = [MASQUÉ]<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Étape 1 : r1 = 8 × 4 = 32\nÉtape 2 : r2 = r1 − 2 = [MASQUÉ]<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : 3<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "b5f1a1692d14f772e6e9",
+      "split": "surface_holdout",
+      "objective": "order_steps",
+      "target": "A",
+      "greedy_ok": false,
+      "greedy_text": "lème : EAXEA<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "lème : ED 1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "- Étape 2 : r2 = -3 − 6 = -6\n\nRejoins donc \\( A \\) et \\( B \\) par les lettres séparées par des virgules :\n\n\\[ A \\text{R} = r1 \\]\n\\"
+        },
+        {
+          "ok": false,
+          "text": "te r1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "lème : E, ea, ed, d.<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "e18b3fd7c03998a09e37",
+      "split": "surface_holdout",
+      "objective": "execute",
+      "target": "3",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n1<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "0ccded32fb366e00b9af",
+      "split": "structure_holdout",
+      "objective": "order_steps",
+      "target": "A,B",
+      "greedy_ok": false,
+      "greedy_text": "A, B, B, B<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "A<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Pour résoudre cette tâche, nous devons identifier les lettres dans l'ordre inverse entre les deux valeurs données : `A` et `B`.\n\n1. Étape 1 : `A`\n2. Étape 2 : `A`\n3. Étape 3 : `B`\n\n"
+        },
+        {
+          "ok": false,
+          "text": "Pour résoudre cette tâche, nous devons inverser les mots de l'instruction donnée et voir si le résultat final correspond à l'ordre de la phrase.\n\n1. Étape 1 : \"r1 = 3 − 2 = 1\"\n\n2. Étape 2 : \"r"
+        },
+        {
+          "ok": false,
+          "text": "A<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "866f972996a6696465c9",
+      "split": "structure_holdout",
+      "objective": "masked_step",
+      "target": "40",
+      "greedy_ok": false,
+      "greedy_text": "Pour masquer le résultat masqué, nous devons identifier les éléments de l'instruction.\n\nÉtape 1 : r1 = 4 × 9 = 36\nÉtape 2 : r2 = r1 − r2 = [MASQUÉ]\n\nCela signifie que",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "[-4 + 8]\n\nÉtape 1 : r1 = 4 × 9 = 36\nÉtape 2 : r2 = r1 − r2 = [MASQUÉ]\nÉtape 3 : r3 = r1 − r2 ="
+        },
+        {
+          "ok": false,
+          "text": "**Étape 1 : r1** est égal à 4 × 9 = 36.\n\n1. **Étape 2 : r1** a un maximum de 4 × 9 = 36. Donc, r1 est maximum de 36 × 9 ="
+        },
+        {
+          "ok": false,
+          "text": "Pour masquer cette exécution, nous devons identifier le décalage entre la première lettre de l'instruction et le deuxième caractère du sous-tableau.\n\nL'instruction `[MASQUÉ]` se termine par `(1 + 2 + 3)`. Pour trouver le décalage entre `("
+        },
+        {
+          "ok": false,
+          "text": "Pour obtenir le résultat masqué, identifions les valeurs de \\( r1 \\) et \\( r2 \\).\n\n**R1 = 4 × 9 = 36\\)\n\n**R2 = 4 − 8 = -4\\)\n\n"
+        }
+      ]
+    },
+    {
+      "id": "c21af25dec88c1010ddd",
+      "split": "structure_holdout",
+      "objective": "masked_step",
+      "target": "324",
+      "greedy_ok": false,
+      "greedy_text": "Pour masquer le résultat masqué, nous devons identifier les éléments de l'instruction `r1` et `r2`.\n\n1. `r1 = 4 + 2 = 6`\n2. `r2 = r1 × r2 = [MASQUÉ]`",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Pour masquer la sous-exécution du programme \\(\\{\\mathbf{R}} = \\{\\{e\\}\\{\\mathbf{I}\\}\\{\\mathbf{J}\\}\\}\\{\\mathbf{"
+        },
+        {
+          "ok": false,
+          "text": "Pour masquer correctement le résultat de l'exécution \\(\\sqrt{\\mathbf{E}}^{\\circ}}\\), nous devons d'abord déterminer le décalage dans le plan \\(xyz\\) des positions des termes en entrée.\n\nComm"
+        },
+        {
+          "ok": false,
+          "text": "Pour compléter cette exécution, on doit identifier la figure ou le personnage associé à chaque élément.\n\nÉtape 1 : r1, r2 = 4 + 2 = 6\nÉtape 2 : r1 = 6 × 9 = 54\nÉtape 3 : r2 ="
+        },
+        {
+          "ok": false,
+          "text": "<think> : 3 × 6 × 9 × 54 = 396, donc 396 ÷ 1 = 34\n</think> : 2 × 9 × 54 = 266, donc 266 ÷ "
+        }
+      ]
+    },
+    {
+      "id": "66851f377dbe3d6b373b",
+      "split": "structure_holdout",
+      "objective": "execute",
+      "target": "64",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n1<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1re étape : Calculer la somme de 6 fois 8 et 9 moins -7.\n-1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n**Solution :**\n1. Calculer la somme de 6 fois 8 et 9 moins -7.\n2. additionner ces deux résultats pour obtenir la somme totale :\n3 + 9 moins -7 = 36.\n\nDonc, la somme de 6 fois"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "c55bc7ad76a20aa12ffa",
+      "split": "structure_holdout",
+      "objective": "masked_step",
+      "target": "2",
+      "greedy_ok": false,
+      "greedy_text": "Pour masquer le résultat masqué, nous devons identifier les valeurs possibles de \\( r \\).\n\nL'exécution \\( r1 = 5 \\) − 8 = -1 \\) donne \\( r1 = -1 \\).\n\nAinsi, le résultat masqué est \\",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Pour trouver le résultat masqué de l'expression \\( \\left(\\frac{\\pi}{3}, \\frac{\\pi}{5}, \\ldots} \\right) = \\frac{\\sqrt{2}}{2} \\),"
+        },
+        {
+          "ok": false,
+          "text": "Pour masquer l'exécution \\(\\Delta R1\\), nous devons d'abord identifier les termes dans la fonction \\(\\Delta R1\\). Dans notre exemple, \\(\\Delta R1 = -1\\), donc \\(\\Delta R1 ="
+        },
+        {
+          "ok": false,
+          "text": "Pour masquer la soustraction de l'étape 1 de l'étape 2, nous devons identifier correctement la séquence de lettres correspondant à l'entrée de l'instruction.\n\nVoici le résultat :\n\nÉtape 1 : r1 = 5 − 6 = -1\n"
+        },
+        {
+          "ok": false,
+          "text": "Pour masquer le résultat masqué, vous pouvez utiliser la formule \\(\\log r(r1)\\). Ici, \\(r = \\frac{-1}{2}\\).\n\n\\[ r(r1) = \\frac{-1}{2} \\]"
+        }
+      ]
+    },
+    {
+      "id": "c299fa7cec11bb950e90",
+      "split": "structure_holdout",
+      "objective": "number_only",
+      "target": "-5",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think><|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n</think><|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think>\n</think><|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n</think><|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n</think>\n</think><|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "d7a590b3cbbca49d8e04",
+      "split": "structure_holdout",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": true,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1\n1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1\n\n1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "12<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "fc27700f6ae71cc937f2",
+      "split": "structure_holdout",
+      "objective": "order_steps",
+      "target": "B,A",
+      "greedy_ok": false,
+      "greedy_text": "lème : EAXYZRBQRGLQMFQRFQGQ\n\nRéponse : B<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "lème : A, Étape 2 r2 = 24 − r1 = 13<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "lème : E a la étape 2 r2 = 24 − r1 = 13\n\nRéponse : E<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "- Étape 1 : r2 = 24 − r1 = 13\n\nRe:- Étape 1 r2 = 24 − r1 = 13<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "- Étape 2 : r2 = 24 − r1 = 13\n\nH : r1 = 9 − 3 = 6<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "37a02eb2d7b424639765",
+      "split": "structure_holdout",
+      "objective": "masked_step",
+      "target": "-594",
+      "greedy_ok": false,
+      "greedy_text": "<think> : 196\n  r1 = 197 × 2 = 394\n  r2 = 398 × 1 = 398<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think> \\ r1 = 9 × 3 = 27; r2 = 33 × 2 = 66<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think> = -9 × 2 = 18\n</think> = r1 = 18 + 18 = 36\n</think> = r2 = 36 + 33 = 69<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -27<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think> \\\"\\ r1 = 9 \\, \\text{cm} \\\\ r2 = 19 \\, \\text{cm} \\\\ r3 = 184\\, \\text{cm}^2 \\\\ r1 = 91118\\"
+        }
+      ]
+    },
+    {
+      "id": "dc1308f84f7950a497c8",
+      "split": "structure_holdout",
+      "objective": "number_only",
+      "target": "-14",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n- 8<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n- 8 > -9 \\implies -8 > 9\n\nLe produit de -8 et -9 est -9.<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think> : -8 + 9 - 5 = 14.\n</think> = 14<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>  : -8 + 9 - 5 = 14.\n</think>  : -9 − 5 = 9.<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n- 8<|im_end|>"
+        }
+      ]
+    }
+  ]
+}

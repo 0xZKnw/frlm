@@ -33,6 +33,8 @@ utilisateurs et pour les explications métier.
 - `frlm/rl_tasks_v45.py`, `frlm/verifiers_v45.py` : tâches RLVR non-OOD et
   vérificateurs typés stricts du post-training v4.5.
 - `frlm/rl_profile_v45.py`, `frlm/rl_v45.py` : profil pass@k et DrGRPO local v4.5.
+- `frlm/reason_bootstrap_v45.py`, `frlm/eval_reason_bootstrap_v45.py` : mini-SFT
+  AST exécutable et profil pass@k hors OOD pour restaurer une frontière avant RLVR.
 - `frlm/rlaif_offline_v45.py`, `frlm/dpo_v45.py` : candidats aveugles, paires
   scellées et préférence hors-ligne v4.5.
 - `frlm/distill.py` : génération et filtrage de données de distillation via API.
@@ -150,6 +152,38 @@ séparé de 12 %. Le mix cible 24M tokens assistant en 30/18/18/12/8/6/5/3 et pl
 OpenHermes-FR à 12 %. Les 736 steps correspondent à environ 1,15 passe pour 24M
 tokens assistant et 37,5k tokens supervisés par update. Réexécuter l'audit après
 chaque rebuild et ajuster ce nombre si la densité change, sans relancer le mid.
+
+Si le profil RLVR reste à 0/pass@k sur le raisonnement, intercaler le bootstrap
+supervisé `reason45` au lieu de lancer davantage de GRPO. Il génère 20k programmes
+AST exécutés par Python, réserve des holdouts de surface et de topologie, et ne lit
+jamais OOD v2 :
+
+```powershell
+python run.py prepare-reason-bootstrap-v45 --data-dir data-v4 --examples 20000 --seq-len 256 --eval-per-split 120 --seed 455500
+python -m frlm.audit_reason_bootstrap_v45 --data-dir data-v4
+python -m frlm.eval_reason_bootstrap_v45 --run fr-v4-v45-sft --data-dir data-v4 --stage sft --ckpt best --tasks 30 -k 4
+python run.py sft --data-dir data-v4 --run fr-v4-v45-reason --preset v4-base --sft-recipe reason45 --seq-len 256 --batch-size 128 --grad-accum 4 --max-steps 160 --optimizer adamw --lr 5e-6 --weight-decay 0.01 --schedule cosine --warmup 10 --min-lr-frac 0.10 --replay-frac 0 --eval-every 20 --eval-iters 30 --sample-every 20 --save-every 40 --ckpt-every-min 10000 --keep-last 6 --resume runs/fr-v4-v45-sft/sft/ckpt_best.pt --init-weights-only
+```
+
+La recette contient déjà 20 % de rétention v4.5 : conserver `--replay-frac 0`.
+`--init-weights-only` est obligatoire pour repartir au step 0 avec un AdamW neuf ;
+une reprise normale entre deux checkpoints `stage=sft` restaurerait sinon le step
+736 et l'ancien optimiseur. Les bins de rétention peuvent rester uniquement sur le
+Volume Modal ; l'audit local les reporte alors comme différés et le préflight Modal
+valide leur présence et leur taille avant toute allocation GPU.
+
+Le run H100 `fr-v4-v45-reason` a fini à 160 steps / 20,97M tokens traités. Son
+minimum de validation est `ckpt_best.pt` au step 120 (`0,2246`) ; les steps 140 et
+160 remontent légèrement à `0,2251` et `0,2256`. Toujours comparer ce best sur les
+holdouts AST de surface/structure et sur des générations brutes avant de reprendre
+RLVR. Les losses de rétention stables ne suffisent pas à conclure à un gain OOD.
+Le profil strict du best donne 11/30 greedy et 17/30 pass@4, mais OOD v2 régresse à
+2/40. Une interpolation de poids à 25 % bootstrap atteint 7/40 après revue manuelle
+mais ne conserve que 2/30 pass@4 ; 35 % donne 4/40 et 7/30, 50 % donne 3/40 et 9/30.
+Ces mesures font désormais d'OOD v2 un benchmark de développement, pas un holdout
+propre. Pour une seconde recette, réduire fortement les sorties numériques et ajouter
+des programmes symboliques/état à cibles textuelles ainsi que plus de rétention ; ne
+pas lancer directement RLVR sur le best 120 pur.
 
 Le post-training local suivant reste nommé **v4.5** ; réserver `v5` à un futur
 pré-entraînement neuf. Le pipeline corrigé ne remplace pas les anciens `rl.py` et

@@ -216,8 +216,10 @@ class CheckpointManager:
 # Entraîneur
 # ======================================================================================
 class Trainer:
-    def __init__(self, cfg: TrainConfig, resume: str | None = None):
+    def __init__(self, cfg: TrainConfig, resume: str | None = None,
+                 init_weights_only: bool = False):
         self.cfg = cfg
+        self.init_weights_only = init_weights_only
         self.run_dir = Path(cfg.out_dir) / cfg.run_name
         # Un dossier de checkpoints PAR PHASE : un SFT ne doit jamais écraser le
         # pré-entraînement, sinon on ne peut plus reprendre ce dernier.
@@ -249,33 +251,37 @@ class Trainer:
         self.mid_curriculum: list[tuple[float, str, D.BinCorpus]] = []
         sft_recipe = cfg.sft_recipe.casefold().replace("v", "").replace(".", "")
         if masked and sft_recipe:
-            if sft_recipe not in ("44", "45"):
+            if sft_recipe not in ("44", "45", "reason45"):
                 sys.exit(f"[!] Recette SFT inconnue : {cfg.sft_recipe}")
             try:
-                key = f"sft_v{sft_recipe}"
+                key = ("reason_bootstrap_v45" if sft_recipe == "reason45"
+                       else f"sft_v{sft_recipe}")
                 expected_recipe = {
                     "44": "v4.4-balanced-capabilities-18m",
                     "45": "v4.5-audited-isolated-24m",
+                    "reason45": "v4.5-reason-bootstrap-ast-1",
                 }[sft_recipe]
                 section = json.loads((data_dir / "meta.json").read_text(
                     encoding="utf-8"))[key]
                 if section["recipe"] != expected_recipe:
                     raise ValueError(f"recette inattendue : {section['recipe']}")
-                corpus_cls = D.ConversationCorpus if sft_recipe == "45" else D.BinCorpus
+                isolated = sft_recipe in ("45", "reason45")
+                corpus_cls = D.ConversationCorpus if isolated else D.BinCorpus
                 corpora = []
                 for name, capability in section["capabilities"].items():
                     if int(capability["actual_supervised"]) <= 0:
                         continue
-                    if sft_recipe == "45":
+                    if isolated:
                         train = corpus_cls(data_dir / capability["train_path"], cfg.seq_len)
                     else:
                         train = corpus_cls(data_dir / capability["train_path"],
                                            cfg.seq_len, with_mask=True)
-                    sampling_weight = (capability["train_conversations"]
-                                       if sft_recipe == "45"
-                                       else capability["actual_supervised"])
+                    sampling_weight = (capability.get("sampling_weight")
+                                       if isolated else capability["actual_supervised"])
+                    if sampling_weight is None:
+                        sampling_weight = capability["train_conversations"]
                     corpora.append((name, train, float(sampling_weight)))
-                    if sft_recipe == "45":
+                    if isolated:
                         self.val_sources[name] = corpus_cls(
                             data_dir / capability["val_path"], cfg.seq_len
                         )
@@ -284,7 +290,7 @@ class Trainer:
                             data_dir / capability["val_path"], cfg.seq_len, with_mask=True
                         )
                 self.train_data = D.SourceMixtureCorpus(corpora)
-                if sft_recipe == "45":
+                if isolated:
                     self.val_data = D.ConversationCorpus(
                         data_dir / section["val_path"], cfg.seq_len
                     )
@@ -292,14 +298,16 @@ class Trainer:
                     self.val_data = D.BinCorpus(data_dir / section["val_path"],
                                                 cfg.seq_len, with_mask=True)
             except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                sys.exit(f"[!] Données SFT v4.{sft_recipe[-1]} absentes ou incohérentes ({exc}). "
-                         f"Lance : python run.py prepare-sft-v{sft_recipe} --data-dir data-v4")
+                command = ("prepare-reason-bootstrap-v45" if sft_recipe == "reason45"
+                           else f"prepare-sft-v{sft_recipe}")
+                sys.exit(f"[!] Données SFT {cfg.sft_recipe} absentes ou incohérentes ({exc}). "
+                         f"Lance : python run.py {command} --data-dir data-v4")
             total_weight = sum(weight for _, _, weight in corpora)
             detail = ", ".join(
                 f"{name}={100 * weight / total_weight:.0f}%"
                 for name, _, weight in corpora
             )
-            print(f"[i] SFT v4.{sft_recipe[-1]} par capacités actif : {detail}")
+            print(f"[i] SFT {cfg.sft_recipe} par capacités actif : {detail}")
         elif cfg.stage == "mid" and cfg.mid_curriculum:
             recipe = cfg.mid_curriculum.casefold().replace("v", "").replace(".", "")
             if recipe != "43":
@@ -331,6 +339,9 @@ class Trainer:
             self.val_data = D.BinCorpus(val_bin, cfg.seq_len, with_mask=masked)
         self.replay_train = self.replay_val = None
         if masked:
+            if sft_recipe == "reason45" and cfg.replay_frac > 0:
+                sys.exit("[!] reason45 contient déjà 20 % de rétention SFT ; utilise "
+                         "--replay-frac 0 pour ne pas compter le replay deux fois")
             if not self.val_sources:
                 for source_path in sorted(data_dir.glob("sft_val_*.bin")):
                     source = source_path.stem.removeprefix("sft_val_")
@@ -499,7 +510,8 @@ class Trainer:
         ck = torch.load(path, map_location=self.device, weights_only=False)
         self.raw_model.load_state_dict(ck["model"])
         # au passage pretrain -> sft on repart des poids mais pas de l'état optimiseur
-        same_stage = ck.get("stage", "pretrain") == self.cfg.stage
+        same_stage = (ck.get("stage", "pretrain") == self.cfg.stage
+                      and not self.init_weights_only)
         if same_stage and len(ck.get("optimizers", [])) == len(self.opts):
             for o, sd in zip(self.opts, ck["optimizers"]):
                 o.load_state_dict(sd)
@@ -516,7 +528,9 @@ class Trainer:
                 pass
             print(f"[i] Reprise depuis {path.name} — step {self.step}, {human(self.tokens_seen)} tokens vus")
         else:
-            print(f"[i] Poids chargés depuis {path.name} (nouvelle phase '{self.cfg.stage}' : optimiseur réinitialisé)")
+            reason = "--init-weights-only" if self.init_weights_only else "nouvelle phase"
+            print(f"[i] Poids chargés depuis {path.name} ({reason} '{self.cfg.stage}' : "
+                  "optimiseur et compteur réinitialisés)")
 
     # ---------------------------------------------------------------------------------
     @torch.no_grad()
@@ -1197,7 +1211,7 @@ def add_train_args(p):
     p.add_argument("--mid-curriculum", default="",
                    help="pour la phase mid : v4.3 active les bins curriculum 80/20")
     p.add_argument("--sft-recipe", default="",
-                   help="pour la phase SFT : v4.4/v4.5 activent le sampling par capacités")
+                   help="SFT : v4.4/v4.5 ou reason45 (bootstrap AST + rétention)")
     p.add_argument("--no-compile", dest="compile", action="store_false",
                    help="désactive torch.compile (actif par défaut : +94%% de débit ; "
                         "retombe tout seul en mode non compilé si triton manque)")
@@ -1207,6 +1221,8 @@ def add_train_args(p):
                    help="pic bf16 dense du GPU en TFLOPS, pour le calcul du MFU (4060 ~= 30)")
     p.add_argument("--resume", nargs="?", const="latest", default=None,
                    help="reprend au checkpoint (latest | best | chemin)")
+    p.add_argument("--init-weights-only", action="store_true",
+                   help="charge seulement les poids de --resume et redémarre step/optimiseur à zéro")
 
 
 def cfg_from_args(args, stage: str) -> TrainConfig:
@@ -1293,6 +1309,15 @@ def main():
     p.add_argument("--seed", type=int, default=1337)
     p.add_argument("--skip-download", action="store_true",
                    help="réutilise toutes les sources JSONL déjà présentes")
+
+    p = sub.add_parser("prepare-reason-bootstrap-v45",
+                       help="construit le mini-SFT AST v4.5 sans téléchargement ni OOD v2")
+    p.add_argument("--data-dir", default="data-v4")
+    p.add_argument("--examples", type=int, default=20_000,
+                   help="exemples synthétiques uniques (défaut 20k)")
+    p.add_argument("--seq-len", type=int, default=256)
+    p.add_argument("--eval-per-split", type=int, default=120)
+    p.add_argument("--seed", type=int, default=455500)
 
     p = sub.add_parser("train", help="pré-entraînement")
     add_train_args(p)
@@ -1543,6 +1568,18 @@ def main():
               "--optimizer adamw --lr 2e-5 --replay-frac 0.12 "
               "--resume runs/fr-v4-v43/mid/ckpt_latest.pt")
 
+    elif args.cmd == "prepare-reason-bootstrap-v45":
+        from frlm.reason_bootstrap_v45 import prepare as prepare_reason_v45
+
+        rep = prepare_reason_v45(
+            Path(args.data_dir), examples=args.examples, max_len=args.seq_len,
+            seed=args.seed, eval_per_split=args.eval_per_split,
+        )
+        print("\n=== Bootstrap raisonnement v4.5 prêt ===")
+        print(json.dumps(rep, indent=2, ensure_ascii=False))
+        print("\nAudit obligatoire : python -m frlm.audit_reason_bootstrap_v45 "
+              "--data-dir data-v4")
+
     elif args.cmd == "prepare" and args.rebin:
         rep = D.rebin_mid_sft(Path(args.data_dir), mid_frac=args.mid_frac,
                               max_seq_len=args.seq_len,
@@ -1570,7 +1607,8 @@ def main():
         cfg = cfg_from_args(args, stage=stage)
         if args.cmd in ("mid", "sft") and args.resume is None:
             args.resume = "latest"   # mid/SFT partent forcément de poids déjà entraînés
-        Trainer(cfg, resume=args.resume).train()
+        Trainer(cfg, resume=args.resume,
+                init_weights_only=args.init_weights_only).train()
 
     elif args.cmd == "rl":
         from frlm.rl import cmd_rl

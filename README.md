@@ -240,6 +240,83 @@ final checkpoint is also `ckpt_best.pt`: validation macro reached 0.10197,
 losses confirm that the recipe learned its supervised capabilities without visible
 MID forgetting; they do not by themselves establish an OOD reasoning gain.
 
+### v4.5 reasoning bootstrap before RLVR
+
+The final v4.5 SFT follows chat instructions better than the MID but loses part of
+the MID's multi-step execution policy: it scores 5/40 after manual OOD v2 review,
+against 8/40 for the v4.3 MID. RLVR cannot repair a family that remains at 0/pass@k,
+because an all-failure group has no useful relative advantage. Before spending the
+local RL budget, `reason45` therefore performs a short supervised bootstrap from the
+existing v4.5 SFT; it does **not** rerun pretraining or midtraining.
+
+The builder creates 20,000 unique Python-executed AST examples (438,559 unique
+assistant tokens) over execution traces, masked intermediate results, step ordering,
+error localization and number-only answers. Train contains 12 AST topologies while
+the structural validation contains 33 disjoint topologies; a separate surface
+holdout changes the wording without changing the train topology class. No OOD v2
+prompt, family or seed is read. The training sampler is 80% AST and 20% existing
+v4.5 retention data (chat, code, uncertainty, grounding and identity/style).
+
+```bash
+python run.py prepare-reason-bootstrap-v45 --data-dir data-v4 \
+  --examples 20000 --seq-len 256 --eval-per-split 120 --seed 455500
+python -m frlm.audit_reason_bootstrap_v45 --data-dir data-v4
+
+# Read-only local frontier profiles, never OOD v2.
+python -m frlm.eval_reason_bootstrap_v45 --run fr-v4-v43 --data-dir data-v4 \
+  --stage mid --ckpt best --tasks 30 -k 4
+python -m frlm.eval_reason_bootstrap_v45 --run fr-v4-v45-sft --data-dir data-v4 \
+  --stage sft --ckpt best --tasks 30 -k 4
+
+# CPU preflight first; use the same inner command for the detached H100 launch.
+modal run modal_app.py --check-only --gpu h100 --cmd \
+  "python run.py sft --data-dir data-v4 --run fr-v4-v45-reason --preset v4-base --sft-recipe reason45 --seq-len 256 --batch-size 128 --grad-accum 4 --max-steps 160 --optimizer adamw --lr 5e-6 --weight-decay 0.01 --schedule cosine --warmup 10 --min-lr-frac 0.10 --replay-frac 0 --eval-every 20 --eval-iters 30 --sample-every 20 --save-every 40 --ckpt-every-min 10000 --keep-last 6 --resume /vol/runs/fr-v4-v45-sft/sft/ckpt_best.pt --init-weights-only"
+```
+
+`--init-weights-only` is mandatory here: both the source and destination phases are
+named `sft`, but this is a new optimization phase. Without it, a normal resume would
+restore the old step and AdamW state. `--replay-frac 0` is also mandatory because the
+20% retention mixture is already part of `reason45`.
+
+The H100 run completed at step 160 after 20.97M padded tokens, at approximately
+229-230k tok/s (26.3% measured MFU). The validation minimum is the saved **step 120**
+checkpoint, not the final checkpoint:
+
+| step | macro val | execute | masked step | order | find error | number only | general replay |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 20 | 0.3725 | 0.175 | 0.798 | 0.338 | 0.408 | 1.419 | 0.530 |
+| 80 | 0.2305 | 0.056 | 0.606 | 0.001 | 0.151 | 0.905 | 0.531 |
+| **120** | **0.2246** | **0.046** | **0.572** | **≈0.000** | **0.151** | **0.891** | **0.532** |
+| 160 | 0.2256 | 0.041 | 0.577 | 0.002 | 0.153 | 0.896 | 0.531 |
+
+Code, uncertainty, grounded transformation and style/identity replay losses stayed
+within 0.001-0.038 throughout the run. This is evidence of retention on those SFT
+validation buckets, not yet evidence of OOD gain. Before any new RLVR update, profile
+`ckpt_best.pt` on both held-out AST manifests and rerun the strict OOD report; use the
+raw generations for manual correction.
+
+The post-run profiles expose a genuine trade-off. The pure bootstrap creates the
+missing trainable frontier, including unseen AST structures, but over-specializes the
+output policy toward numeric answers. Linear weight interpolation with the original
+SFT recovers OOD behavior but progressively removes that frontier:
+
+| checkpoint | strict AST greedy | strict AST pass@4 | OOD v2 auto | OOD v2 manual | facts |
+|---|---:|---:|---:|---:|---:|
+| original v4.5 SFT step 736 | 0/15 smoke | 0/15 pass@2 | 5/40 | 5/40 | 5/12 |
+| bootstrap best step 120 | **11/30** | **17/30** | 2/40 | 2/40 | 5/12 |
+| 50% bootstrap blend | 7/30 | 9/30 | 3/40 | 3/40 | 5/12 |
+| 35% bootstrap blend | 5/30 | 7/30 | 4/40 | 4/40 | 5/12 |
+| 25% bootstrap blend | 1/30 | 2/30 | 6/40 | **7/40** | 5/12 |
+
+The extra manual point for the 25% blend is an explicit final computation
+`(10 + 5) / 3 = 5` sent to review by the conservative strict scorer. All six automatic
+points were also inspected and are true positives. Because OOD v2 has now been used
+repeatedly for development selection, these numbers are diagnostic rather than a
+clean generalization claim. `python -m frlm.blend_checkpoints` reproduces the compact
+optimizer-free blends. The next bootstrap revision should reduce numeric AST exposure,
+add verified symbolic/state programs with textual outputs, and increase general and
+constraint retention; it should not spend more RL updates on the pure step-120 policy.
+
 ### v4 development observations (OOD v2)
 
 OOD v2 reports the exact raw generations rather than only an aggregate. The automatic

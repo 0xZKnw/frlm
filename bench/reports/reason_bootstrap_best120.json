@@ -1,0 +1,926 @@
+{
+  "schema": "frlm-reason-bootstrap-profile-1",
+  "model": {
+    "checkpoint": "runs\\fr-v4-v45-reason\\sft\\ckpt_best.pt",
+    "step": 120,
+    "phase": "sft",
+    "protocol": "chat",
+    "dtype": "torch.bfloat16"
+  },
+  "settings": {
+    "splits": [
+      "iid",
+      "surface_holdout",
+      "structure_holdout"
+    ],
+    "tasks_per_split": 10,
+    "k": 4,
+    "max_new": 64,
+    "seed": 455532
+  },
+  "elapsed_seconds": 32.61,
+  "metrics": {
+    "iid": {
+      "tasks": 10,
+      "greedy": 4,
+      "pass_k": 7,
+      "samples": 40,
+      "sample_success": 20,
+      "greedy_rate": 0.4,
+      "pass@4": 0.7,
+      "sample_success_rate": 0.5
+    },
+    "macro": {
+      "tasks": 30,
+      "greedy": 11,
+      "pass_k": 17,
+      "samples": 120,
+      "sample_success": 50,
+      "greedy_rate": 0.36666666666666664,
+      "pass@4": 0.5666666666666667,
+      "sample_success_rate": 0.4166666666666667
+    },
+    "objective:execute": {
+      "tasks": 6,
+      "greedy": 0,
+      "pass_k": 1,
+      "samples": 24,
+      "sample_success": 1,
+      "greedy_rate": 0.0,
+      "pass@4": 0.16666666666666666,
+      "sample_success_rate": 0.041666666666666664
+    },
+    "objective:find_error": {
+      "tasks": 9,
+      "greedy": 7,
+      "pass_k": 9,
+      "samples": 36,
+      "sample_success": 30,
+      "greedy_rate": 0.7777777777777778,
+      "pass@4": 1.0,
+      "sample_success_rate": 0.8333333333333334
+    },
+    "objective:masked_step": {
+      "tasks": 7,
+      "greedy": 0,
+      "pass_k": 2,
+      "samples": 28,
+      "sample_success": 2,
+      "greedy_rate": 0.0,
+      "pass@4": 0.2857142857142857,
+      "sample_success_rate": 0.07142857142857142
+    },
+    "objective:number_only": {
+      "tasks": 4,
+      "greedy": 0,
+      "pass_k": 1,
+      "samples": 16,
+      "sample_success": 1,
+      "greedy_rate": 0.0,
+      "pass@4": 0.25,
+      "sample_success_rate": 0.0625
+    },
+    "objective:order_steps": {
+      "tasks": 4,
+      "greedy": 4,
+      "pass_k": 4,
+      "samples": 16,
+      "sample_success": 16,
+      "greedy_rate": 1.0,
+      "pass@4": 1.0,
+      "sample_success_rate": 1.0
+    },
+    "structure_holdout": {
+      "tasks": 10,
+      "greedy": 3,
+      "pass_k": 4,
+      "samples": 40,
+      "sample_success": 12,
+      "greedy_rate": 0.3,
+      "pass@4": 0.4,
+      "sample_success_rate": 0.3
+    },
+    "surface_holdout": {
+      "tasks": 10,
+      "greedy": 4,
+      "pass_k": 6,
+      "samples": 40,
+      "sample_success": 18,
+      "greedy_rate": 0.4,
+      "pass@4": 0.6,
+      "sample_success_rate": 0.45
+    }
+  },
+  "details": [
+    {
+      "id": "d3579afd442d27f4282b",
+      "split": "iid",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": true,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "af29c5be6e2c20f8ff06",
+      "split": "iid",
+      "objective": "masked_step",
+      "target": "-24",
+      "greedy_ok": false,
+      "greedy_text": "Réponse : -12<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "Réponse : -24<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -76<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -66<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : 3<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "7ddd90e5b0200883005b",
+      "split": "iid",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": true,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "94442c6cebad3a268adc",
+      "split": "iid",
+      "objective": "find_error",
+      "target": "2",
+      "greedy_ok": false,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "2<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "2<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "2<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "bf12be68a6096a661151",
+      "split": "iid",
+      "objective": "masked_step",
+      "target": "-3",
+      "greedy_ok": false,
+      "greedy_text": "Réponse : -1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Réponse : -2<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -5<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "Réponse : -3<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "af55da3a4090474ce907",
+      "split": "iid",
+      "objective": "execute",
+      "target": "-80",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n100<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n100<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n100<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n100<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n\n1. There is a value of 20 in the following.<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "7583713c8349dcb8493b",
+      "split": "iid",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": true,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": false,
+          "text": "2<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "1f8db7bad23677e3de28",
+      "split": "iid",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": true,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "cd3130de0b3a0f34489d",
+      "split": "iid",
+      "objective": "number_only",
+      "target": "7",
+      "greedy_ok": false,
+      "greedy_text": "11<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "9<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "10<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "12<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "10<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "352fe121f89d6422a6b1",
+      "split": "iid",
+      "objective": "execute",
+      "target": "-7",
+      "greedy_ok": false,
+      "greedy_text": "<think>\nÉtape 1 : r1 = -3 � − -4 = -12\n étape 2 : r2 = r1 × -7 = -76\nRéponse : -76<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\nÉtape 1 : r1 = -3 � − -4 = -3\n étape 2 : r2 = r1 − -7 = -15\nRéponse : -15<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\nÉtape 1 : r1 = -3 � − -4 = -7\nÉtape 2 : r2 = r1 − -7 = -15\nRéponse : -15<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\nÉtape 1 : r1 = -3 � - -7 = -7\n étape 2 : r2 = r1 × -7 = -10\n étape 3 : r3 = r1 × -1 = -5\n\nRéponse : -5<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\nÉtape 1 : r1 = -3 � − -4 = -1\n étape 2 : r2 = r1 − -7 = -4\nRéponse : -4<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "55c18434c25d3498558a",
+      "split": "surface_holdout",
+      "objective": "number_only",
+      "target": "5",
+      "greedy_ok": false,
+      "greedy_text": "-12<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "-25<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "-30<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "-11<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "-35<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "d39abb33dfcec9477ed4",
+      "split": "surface_holdout",
+      "objective": "execute",
+      "target": "-19",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n étape 1 : r1 = -13 + - -6 = -19\n étape 2 : r2 = r1 + -6 = -35\nConclusion : -35<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "<think>\nRéponse : -13 + -6 = -19\nRéponse : -19<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n étape 1 : r1 = -13 + - -6 = -3\n étape 2 : r2 = r1 − -13 = -3\n\nRéponse : -3<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n étape 1 : r1 = -13 − -6 = -21\n étape 2 : r2 = r1 + -6 = -37\nConclusion : + 37 = -37<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n étape 1 : r1 = -13 − -6 = -3\n étape 2 : r2 = r1 + -6 = -11\n\nRéponse : -11<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "5fbc9018868f49f3b753",
+      "split": "surface_holdout",
+      "objective": "order_steps",
+      "target": "A",
+      "greedy_ok": true,
+      "greedy_text": "A<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "A<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "A<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "A<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "A<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "c58ab6ac43b3de109070",
+      "split": "surface_holdout",
+      "objective": "find_error",
+      "target": "2",
+      "greedy_ok": false,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": false,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "2<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "ac5030eb7cae95f405d8",
+      "split": "surface_holdout",
+      "objective": "execute",
+      "target": "32",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n1<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "54d7dd4cc775becd7ffe",
+      "split": "surface_holdout",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": true,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "733e223b6f0f4c0a0374",
+      "split": "surface_holdout",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": true,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "6c3ac500a29a7079fe08",
+      "split": "surface_holdout",
+      "objective": "masked_step",
+      "target": "30",
+      "greedy_ok": false,
+      "greedy_text": "Réponse : 16<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Réponse : 24<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : 34<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : 28<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : 36<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "b5f1a1692d14f772e6e9",
+      "split": "surface_holdout",
+      "objective": "order_steps",
+      "target": "A",
+      "greedy_ok": true,
+      "greedy_text": "A<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "A<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "A<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "A<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "A<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "e18b3fd7c03998a09e37",
+      "split": "surface_holdout",
+      "objective": "execute",
+      "target": "3",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n1<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "0ccded32fb366e00b9af",
+      "split": "structure_holdout",
+      "objective": "order_steps",
+      "target": "A,B",
+      "greedy_ok": true,
+      "greedy_text": "A,B<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "A,B<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "A,B<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "A,B<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "A,B<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "866f972996a6696465c9",
+      "split": "structure_holdout",
+      "objective": "masked_step",
+      "target": "40",
+      "greedy_ok": false,
+      "greedy_text": "Réponse : -1<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Réponse : -4<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : 5<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "c21af25dec88c1010ddd",
+      "split": "structure_holdout",
+      "objective": "masked_step",
+      "target": "324",
+      "greedy_ok": false,
+      "greedy_text": "Réponse : 11<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Réponse : 13<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : 11<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : 17<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : 33<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "66851f377dbe3d6b373b",
+      "split": "structure_holdout",
+      "objective": "execute",
+      "target": "64",
+      "greedy_ok": false,
+      "greedy_text": "<think>\n1<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "<think>\n1 étape = 11\nRéponse : 11<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1 étape = 17\nRéponse : -7<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\nÉtape 1 : r1 = 6 × 8 = 48\n + -7 = 41\n</think>\nÉtape 2 : r2 = r1 + -7 = 44\n + 9 = 53\n</think>\nRéponse : 53<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "<think>\n1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "c55bc7ad76a20aa12ffa",
+      "split": "structure_holdout",
+      "objective": "masked_step",
+      "target": "2",
+      "greedy_ok": false,
+      "greedy_text": "Réponse : -1<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Réponse : -4<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -7<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -1<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -4<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "c299fa7cec11bb950e90",
+      "split": "structure_holdout",
+      "objective": "number_only",
+      "target": "-5",
+      "greedy_ok": false,
+      "greedy_text": "13<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "7<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "6<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "6<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "7<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "d7a590b3cbbca49d8e04",
+      "split": "structure_holdout",
+      "objective": "find_error",
+      "target": "1",
+      "greedy_ok": true,
+      "greedy_text": "1<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": false,
+          "text": "2<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "1<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "fc27700f6ae71cc937f2",
+      "split": "structure_holdout",
+      "objective": "order_steps",
+      "target": "B,A",
+      "greedy_ok": true,
+      "greedy_text": "B,A<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": true,
+          "text": "B,A<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "B,A<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "B,A<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "B,A<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "37a02eb2d7b424639765",
+      "split": "structure_holdout",
+      "objective": "masked_step",
+      "target": "-594",
+      "greedy_ok": false,
+      "greedy_text": "Réponse : -19<|im_end|>",
+      "pass_k": false,
+      "samples": [
+        {
+          "ok": false,
+          "text": "Réponse : -19<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -53<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -26<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "Réponse : -24<|im_end|>"
+        }
+      ]
+    },
+    {
+      "id": "dc1308f84f7950a497c8",
+      "split": "structure_holdout",
+      "objective": "number_only",
+      "target": "-14",
+      "greedy_ok": false,
+      "greedy_text": "-18<|im_end|>",
+      "pass_k": true,
+      "samples": [
+        {
+          "ok": false,
+          "text": "-16<|im_end|>"
+        },
+        {
+          "ok": true,
+          "text": "-14<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "-33<|im_end|>"
+        },
+        {
+          "ok": false,
+          "text": "-5<|im_end|>"
+        }
+      ]
+    }
+  ]
+}
