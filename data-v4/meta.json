@@ -1821,5 +1821,392 @@
         "replay_source": "sft_v45"
       }
     }
+  },
+  "reason_bootstrap_v45b": {
+    "recipe": "v4.5-reason-bootstrap-balanced-2",
+    "source_recipe": "v4.5-reason-bootstrap-ast-1",
+    "seed": 455500,
+    "examples": 20000,
+    "max_conversation_tokens": 256,
+    "sequence_isolation_required": true,
+    "train_path": "reason_v45_train.bin",
+    "train_tokens": 1312924,
+    "val_path": "reason_v45_val.bin",
+    "val_tokens": 7463,
+    "actual_supervised_tokens": 438559,
+    "ast_fraction": 0.35,
+    "retention_fraction": 0.65,
+    "eval_per_split": 120,
+    "eval_manifests": {
+      "iid": "raw/reason_bootstrap_v45_iid.jsonl",
+      "surface_holdout": "raw/reason_bootstrap_v45_surface_holdout.jsonl",
+      "structure_holdout": "raw/reason_bootstrap_v45_structure_holdout.jsonl"
+    },
+    "operator_signatures_train": [
+      "add(C,C)",
+      "add(add(C,C),C)",
+      "add(mul(C,C),C)",
+      "add(sub(C,C),C)",
+      "mul(C,C)",
+      "mul(add(C,C),C)",
+      "mul(mul(C,C),C)",
+      "mul(sub(C,C),C)",
+      "sub(C,C)",
+      "sub(add(C,C),C)",
+      "sub(mul(C,C),C)",
+      "sub(sub(C,C),C)"
+    ],
+    "operator_signatures_structure_holdout": [
+      "add(C,add(C,C))",
+      "add(C,mul(C,C))",
+      "add(C,sub(C,C))",
+      "add(add(C,C),add(C,C))",
+      "add(add(C,C),mul(C,C))",
+      "add(add(C,C),sub(C,C))",
+      "add(mul(C,C),add(C,C))",
+      "add(mul(C,C),sub(C,C))",
+      "add(sub(C,C),add(C,C))",
+      "add(sub(C,C),mul(C,C))",
+      "add(sub(C,C),sub(C,C))",
+      "mul(C,add(C,C))",
+      "mul(C,mul(C,C))",
+      "mul(C,sub(C,C))",
+      "mul(add(C,C),add(C,C))",
+      "mul(add(C,C),mul(C,C))",
+      "mul(add(C,C),sub(C,C))",
+      "mul(mul(C,C),add(C,C))",
+      "mul(mul(C,C),mul(C,C))",
+      "mul(sub(C,C),add(C,C))",
+      "mul(sub(C,C),mul(C,C))",
+      "mul(sub(C,C),sub(C,C))",
+      "sub(C,add(C,C))",
+      "sub(C,mul(C,C))",
+      "sub(C,sub(C,C))",
+      "sub(add(C,C),add(C,C))",
+      "sub(add(C,C),mul(C,C))",
+      "sub(mul(C,C),add(C,C))",
+      "sub(mul(C,C),mul(C,C))",
+      "sub(mul(C,C),sub(C,C))",
+      "sub(sub(C,C),add(C,C))",
+      "sub(sub(C,C),mul(C,C))",
+      "sub(sub(C,C),sub(C,C))"
+    ],
+    "structure_overlap": [],
+    "capabilities": {
+      "ast_execute": {
+        "sampling_weight": 0.18,
+        "actual_supervised": 390950,
+        "train_path": "reason_v45_train_execute.bin",
+        "train_tokens": 698907,
+        "train_conversations": 9295,
+        "val_path": "reason_v45_val_execute.bin",
+        "val_tokens": 1832,
+        "val_conversations": 24
+      },
+      "ast_masked_step": {
+        "sampling_weight": 0.04,
+        "actual_supervised": 17254,
+        "train_path": "reason_v45_train_masked_step.bin",
+        "train_tokens": 156773,
+        "train_conversations": 2552,
+        "val_path": "reason_v45_val_masked_step.bin",
+        "val_tokens": 1507,
+        "val_conversations": 24
+      },
+      "ast_order_steps": {
+        "sampling_weight": 0.04,
+        "actual_supervised": 9097,
+        "train_path": "reason_v45_train_order_steps.bin",
+        "train_tokens": 154732,
+        "train_conversations": 2067,
+        "val_path": "reason_v45_val_order_steps.bin",
+        "val_tokens": 1799,
+        "val_conversations": 24
+      },
+      "ast_find_error": {
+        "sampling_weight": 0.07,
+        "actual_supervised": 10158,
+        "train_path": "reason_v45_train_find_error.bin",
+        "train_tokens": 208152,
+        "train_conversations": 3386,
+        "val_path": "reason_v45_val_find_error.bin",
+        "val_tokens": 1454,
+        "val_conversations": 24
+      },
+      "ast_number_only": {
+        "sampling_weight": 0.02,
+        "actual_supervised": 11100,
+        "train_path": "reason_v45_train_number_only.bin",
+        "train_tokens": 94360,
+        "train_conversations": 2700,
+        "val_path": "reason_v45_val_number_only.bin",
+        "val_tokens": 871,
+        "val_conversations": 24
+      },
+      "replay_general_response": {
+        "weight": 0.3,
+        "target_supervised": 7200000,
+        "actual_supervised": 7200028,
+        "shortfall_supervised": 0,
+        "train_path": "sft_v45_train_general_response.bin",
+        "train_tokens": 14313644,
+        "train_conversations": 125292,
+        "val_path": "sft_v45_val_general_response.bin",
+        "val_tokens": 132323,
+        "sources": {
+          "chat_human": {
+            "available_supervised": 2054283,
+            "allocated_supervised": 2054283,
+            "train_tokens": 3388002,
+            "train_conversations": 20571,
+            "val_supervised": 9381,
+            "val_tokens": 14990,
+            "val_conversations": 96
+          },
+          "openhermes_fr": {
+            "available_supervised": 2364186,
+            "allocated_supervised": 2364186,
+            "train_tokens": 4637166,
+            "train_conversations": 24993,
+            "val_supervised": 14084,
+            "val_tokens": 26080,
+            "val_conversations": 141
+          },
+          "general_v45": {
+            "available_supervised": 3201709,
+            "allocated_supervised": 2317956,
+            "train_tokens": 5133132,
+            "train_conversations": 67589,
+            "val_supervised": 40017,
+            "val_tokens": 85770,
+            "val_conversations": 1169
+          },
+          "croissant": {
+            "available_supervised": 451376,
+            "allocated_supervised": 451376,
+            "train_tokens": 1138219,
+            "train_conversations": 12056,
+            "val_supervised": 2171,
+            "val_tokens": 5483,
+            "val_conversations": 61
+          },
+          "oasst_fr": {
+            "available_supervised": 12227,
+            "allocated_supervised": 12227,
+            "train_tokens": 17125,
+            "train_conversations": 83,
+            "val_supervised": 0,
+            "val_tokens": 0,
+            "val_conversations": 0
+          }
+        },
+        "sampling_weight": 0.23,
+        "replay_source": "sft_v45"
+      },
+      "replay_grounded_transformation": {
+        "weight": 0.18,
+        "target_supervised": 4320000,
+        "actual_supervised": 4320005,
+        "shortfall_supervised": 0,
+        "train_path": "sft_v45_train_grounded_transformation.bin",
+        "train_tokens": 19361804,
+        "train_conversations": 192552,
+        "val_path": "sft_v45_val_grounded_transformation.bin",
+        "val_tokens": 182790,
+        "sources": {
+          "grounded_v45": {
+            "available_supervised": 6335286,
+            "allocated_supervised": 4085260,
+            "train_tokens": 16669752,
+            "train_conversations": 179712,
+            "val_supervised": 40018,
+            "val_tokens": 167957,
+            "val_conversations": 1758
+          },
+          "qa_human_v44": {
+            "available_supervised": 234745,
+            "allocated_supervised": 234745,
+            "train_tokens": 2692052,
+            "train_conversations": 12840,
+            "val_supervised": 1424,
+            "val_tokens": 14833,
+            "val_conversations": 73
+          }
+        },
+        "sampling_weight": 0.07,
+        "replay_source": "sft_v45"
+      },
+      "replay_verified_reasoning": {
+        "weight": 0.18,
+        "target_supervised": 4320000,
+        "actual_supervised": 4320038,
+        "shortfall_supervised": 0,
+        "train_path": "sft_v45_train_verified_reasoning.bin",
+        "train_tokens": 9715022,
+        "train_conversations": 140468,
+        "val_path": "sft_v45_val_verified_reasoning.bin",
+        "val_tokens": 168921,
+        "sources": {
+          "reasoning_v45": {
+            "available_supervised": 7070939,
+            "allocated_supervised": 3240016,
+            "train_tokens": 7838685,
+            "train_conversations": 120923,
+            "val_supervised": 40020,
+            "val_tokens": 94986,
+            "val_conversations": 1389
+          },
+          "maths_sft": {
+            "available_supervised": 7566125,
+            "allocated_supervised": 864007,
+            "train_tokens": 1479448,
+            "train_conversations": 17301,
+            "val_supervised": 39067,
+            "val_tokens": 66835,
+            "val_conversations": 797
+          },
+          "gsm8k": {
+            "available_supervised": 710382,
+            "allocated_supervised": 216015,
+            "train_tokens": 396889,
+            "train_conversations": 2244,
+            "val_supervised": 4090,
+            "val_tokens": 7100,
+            "val_conversations": 38
+          }
+        },
+        "sampling_weight": 0.08,
+        "replay_source": "sft_v45"
+      },
+      "replay_constraints_structure": {
+        "weight": 0.12,
+        "target_supervised": 2880000,
+        "actual_supervised": 2880002,
+        "shortfall_supervised": 0,
+        "train_path": "sft_v45_train_constraints_structure.bin",
+        "train_tokens": 12727776,
+        "train_conversations": 234518,
+        "val_path": "sft_v45_val_constraints_structure.bin",
+        "val_tokens": 176957,
+        "sources": {
+          "constraints_v45": {
+            "available_supervised": 3502250,
+            "allocated_supervised": 2880002,
+            "train_tokens": 12727776,
+            "train_conversations": 234518,
+            "val_supervised": 40004,
+            "val_tokens": 176957,
+            "val_conversations": 3263
+          }
+        },
+        "sampling_weight": 0.1,
+        "replay_source": "sft_v45"
+      },
+      "replay_multiturn": {
+        "weight": 0.08,
+        "target_supervised": 1920000,
+        "actual_supervised": 1920022,
+        "shortfall_supervised": 0,
+        "train_path": "sft_v45_train_multiturn.bin",
+        "train_tokens": 6915511,
+        "train_conversations": 115945,
+        "val_path": "sft_v45_val_multiturn.bin",
+        "val_tokens": 146038,
+        "sources": {
+          "multiturn_v45": {
+            "available_supervised": 2326343,
+            "allocated_supervised": 1920022,
+            "train_tokens": 6915511,
+            "train_conversations": 115945,
+            "val_supervised": 40000,
+            "val_tokens": 146038,
+            "val_conversations": 2451
+          }
+        },
+        "sampling_weight": 0.06,
+        "replay_source": "sft_v45"
+      },
+      "replay_verified_short_code": {
+        "weight": 0.06,
+        "target_supervised": 1440000,
+        "actual_supervised": 1440040,
+        "shortfall_supervised": 0,
+        "train_path": "sft_v45_train_verified_short_code.bin",
+        "train_tokens": 3040754,
+        "train_conversations": 31266,
+        "val_path": "sft_v45_val_verified_short_code.bin",
+        "val_tokens": 84190,
+        "sources": {
+          "code_v45": {
+            "available_supervised": 5586240,
+            "allocated_supervised": 1440040,
+            "train_tokens": 3040754,
+            "train_conversations": 31266,
+            "val_supervised": 40003,
+            "val_tokens": 84190,
+            "val_conversations": 866
+          }
+        },
+        "sampling_weight": 0.04,
+        "replay_source": "sft_v45"
+      },
+      "replay_uncertainty": {
+        "weight": 0.05,
+        "target_supervised": 1200000,
+        "actual_supervised": 1200013,
+        "shortfall_supervised": 0,
+        "train_path": "sft_v45_train_uncertainty.bin",
+        "train_tokens": 3020324,
+        "train_conversations": 44040,
+        "val_path": "sft_v45_val_uncertainty.bin",
+        "val_tokens": 101188,
+        "sources": {
+          "uncertainty_v45": {
+            "available_supervised": 2692273,
+            "allocated_supervised": 1200013,
+            "train_tokens": 3020324,
+            "train_conversations": 44040,
+            "val_supervised": 40019,
+            "val_tokens": 101188,
+            "val_conversations": 1482
+          }
+        },
+        "sampling_weight": 0.04,
+        "replay_source": "sft_v45"
+      },
+      "replay_style_identity": {
+        "weight": 0.03,
+        "target_supervised": 720000,
+        "actual_supervised": 720014,
+        "shortfall_supervised": 0,
+        "train_path": "sft_v45_train_style_identity.bin",
+        "train_tokens": 1569094,
+        "train_conversations": 16241,
+        "val_path": "sft_v45_val_style_identity.bin",
+        "val_tokens": 87006,
+        "sources": {
+          "style_v45": {
+            "available_supervised": 2447106,
+            "allocated_supervised": 719672,
+            "train_tokens": 1568494,
+            "train_conversations": 16227,
+            "val_supervised": 40028,
+            "val_tokens": 87006,
+            "val_conversations": 908
+          },
+          "identity": {
+            "available_supervised": 342,
+            "allocated_supervised": 342,
+            "train_tokens": 600,
+            "train_conversations": 14,
+            "val_supervised": 0,
+            "val_tokens": 0,
+            "val_conversations": 0
+          }
+        },
+        "sampling_weight": 0.03,
+        "replay_source": "sft_v45"
+      }
+    }
   }
 }

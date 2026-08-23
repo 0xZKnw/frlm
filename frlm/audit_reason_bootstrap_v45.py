@@ -8,7 +8,9 @@ from pathlib import Path
 import numpy as np
 
 from frlm import data as D
-from frlm.reason_bootstrap_v45 import RECIPE_NAME, evaluate_ast, operator_signature
+from frlm.reason_bootstrap_v45 import (
+    BALANCED_RECIPE_NAME, RECIPE_NAME, evaluate_ast, operator_signature,
+)
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -42,12 +44,19 @@ def _audit_bin(path: Path, seq_len: int) -> dict:
             "supervised": int(masks.sum()), "max_tokens": int(lengths.max())}
 
 
-def audit(data_dir: Path, require_replay_local: bool = False) -> dict:
+def audit(data_dir: Path, require_replay_local: bool = False,
+          recipe: str = "reason45") -> dict:
     data_dir = Path(data_dir)
     meta = json.loads((data_dir / "meta.json").read_text(encoding="utf-8"))
-    section = meta.get("reason_bootstrap_v45") or {}
-    if section.get("recipe") != RECIPE_NAME:
+    section_key = "reason_bootstrap_v45b" if recipe == "reason45b" else "reason_bootstrap_v45"
+    expected_recipe = BALANCED_RECIPE_NAME if recipe == "reason45b" else RECIPE_NAME
+    section = meta.get(section_key) or {}
+    if section.get("recipe") != expected_recipe:
         raise ValueError(f"recette bootstrap absente ou ancienne : {section.get('recipe')}")
+    total_weight = sum(float(row["sampling_weight"])
+                       for row in section["capabilities"].values())
+    if abs(total_weight - 1.0) > 1e-9:
+        raise ValueError(f"poids du mélange incohérents : {total_weight}")
     seq_len = int(section["max_conversation_tokens"])
     bins = {}
     deferred_replay = []
@@ -90,7 +99,7 @@ def audit(data_dir: Path, require_replay_local: bool = False) -> dict:
             if row["objective"] in ("execute", "number_only") and str(value) != row["target"]:
                 raise ValueError(f"cible fausse : {row['id']}")
     return {
-        "ok": True, "recipe": RECIPE_NAME, "train_examples": len(train),
+        "ok": True, "recipe": expected_recipe, "train_examples": len(train),
         "eval_examples": {key: len(value) for key, value in eval_sets.items()},
         "train_signatures": len(train_signatures),
         "structure_signatures": len(structure_signatures), "overlap": [],
@@ -105,8 +114,10 @@ def main():
     parser.add_argument("--data-dir", default="data-v4")
     parser.add_argument("--require-replay-local", action="store_true",
                         help="exige aussi une copie locale des anciens bins v4.5")
+    parser.add_argument("--recipe", default="reason45",
+                        choices=("reason45", "reason45b"))
     args = parser.parse_args()
-    print(json.dumps(audit(Path(args.data_dir), args.require_replay_local),
+    print(json.dumps(audit(Path(args.data_dir), args.require_replay_local, args.recipe),
                      ensure_ascii=False, indent=2))
 
 

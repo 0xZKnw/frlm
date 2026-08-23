@@ -313,9 +313,38 @@ The extra manual point for the 25% blend is an explicit final computation
 points were also inspected and are true positives. Because OOD v2 has now been used
 repeatedly for development selection, these numbers are diagnostic rather than a
 clean generalization claim. `python -m frlm.blend_checkpoints` reproduces the compact
-optimizer-free blends. The next bootstrap revision should reduce numeric AST exposure,
-add verified symbolic/state programs with textual outputs, and increase general and
-constraint retention; it should not spend more RL updates on the pure step-120 policy.
+optimizer-free blends. The pure step-120 policy should not receive more RL updates
+directly. A cheaper second recipe, `reason45b`, reuses the exact same verified bins
+but changes the sampler to **35% AST / 65% v4.5 retention**. This avoids another data
+build and gives chat, grounding, varied reasoning, constraints and multiturn outputs
+most of the short training budget:
+
+```bash
+python run.py prepare-reason-bootstrap-v45b --data-dir data-v4
+python -m frlm.audit_reason_bootstrap_v45 --data-dir data-v4 --recipe reason45b
+
+modal run modal_app.py --check-only --gpu h100 --cmd \
+  "python run.py sft --data-dir data-v4 --run fr-v4-v45-reason-balanced --preset v4-base --sft-recipe reason45b --seq-len 256 --batch-size 128 --grad-accum 4 --max-steps 120 --optimizer adamw --lr 3e-6 --weight-decay 0.01 --schedule cosine --warmup 8 --min-lr-frac 0.10 --replay-frac 0 --eval-every 20 --eval-iters 39 --sample-every 20 --save-every 40 --ckpt-every-min 10000 --keep-last 6 --resume /vol/runs/fr-v4-v45-sft/sft/ckpt_best.pt --init-weights-only"
+```
+
+The H100 run completed all 120 updates (15.73M padded tokens) at about 229k tok/s.
+Step 120 is the best checkpoint with macro validation 0.22492. On the same 30-task
+AST subset as the aggressive run, it retains almost all of the useful frontier
+(10/30 greedy, 15/30 pass@4) while strict OOD v2 improves from 2/40 to 4/40. A
+larger 90-task AST profile gives 22/90 greedy and 34/90 pass@4, including 9/30 on
+unseen structures. All three OOD `manual_review` generations were manually checked
+and are false, so 4/40 is the corrected total:
+
+| checkpoint | strict AST greedy | strict AST pass@4 | OOD v2 corrected | facts |
+|---|---:|---:|---:|---:|
+| original v4.5 SFT | 0/15 smoke | 0/15 pass@2 | **5/40** | 5/12 |
+| aggressive reason45 best | **11/30** | **17/30** | 2/40 | 5/12 |
+| balanced reason45b best | 10/30 | 15/30 | **4/40** | 5/12 |
+
+`reason45b` is the preferred bootstrap checkpoint for a future carefully gated
+RLVR attempt: it creates mixed-success groups without paying most of the original
+SFT behavior as the price. OOD v2 remains a development diagnostic, not a clean
+generalization claim.
 
 ### v4 development observations (OOD v2)
 

@@ -20,6 +20,7 @@ from frlm import data as D
 
 
 RECIPE_NAME = "v4.5-reason-bootstrap-ast-1"
+BALANCED_RECIPE_NAME = "v4.5-reason-bootstrap-balanced-2"
 TRAIN_SPLIT = "train"
 EVAL_SPLITS = ("iid", "surface_holdout", "structure_holdout")
 OPS = ("add", "sub", "mul")
@@ -38,6 +39,34 @@ REPLAY_WEIGHTS = {
     "grounded_transformation": 0.02,
     "style_identity": 0.02,
 }
+
+# Seconde passe courte : environ une exposition au corpus AST au lieu des
+# 3,3 expositions de la première recette, avec une majorité de sorties SFT
+# diversifiées pour préserver la politique conversationnelle.
+BALANCED_AST_WEIGHTS = {
+    "execute": 0.18,
+    "masked_step": 0.04,
+    "order_steps": 0.04,
+    "find_error": 0.07,
+    "number_only": 0.02,
+}
+BALANCED_REPLAY_WEIGHTS = {
+    "general_response": 0.23,
+    "grounded_transformation": 0.07,
+    "verified_reasoning": 0.08,
+    "constraints_structure": 0.10,
+    "multiturn": 0.06,
+    "verified_short_code": 0.04,
+    "uncertainty": 0.04,
+    "style_identity": 0.03,
+}
+
+
+def _check_weights(ast_weights: dict[str, float], replay_weights: dict[str, float]) -> None:
+    if abs(sum(ast_weights.values()) + sum(replay_weights.values()) - 1.0) > 1e-9:
+        raise ValueError("les poids du mélange SFT doivent totaliser 1")
+    if any(weight <= 0 for weight in (*ast_weights.values(), *replay_weights.values())):
+        raise ValueError("les poids du mélange SFT doivent être strictement positifs")
 
 
 def evaluate_ast(node: dict) -> int:
@@ -373,4 +402,62 @@ def prepare(data_dir: Path, examples: int = 20_000, max_len: int = 256,
     tmp_meta = data_dir / "meta.json.reason-v45.tmp"
     tmp_meta.write_text(json.dumps(old_meta, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp_meta.replace(data_dir / "meta.json")
+    return report
+
+
+def prepare_balanced(data_dir: Path) -> dict:
+    """Publie le mélange 35 % AST / 65 % rétention sans régénérer les bins."""
+    _check_weights(BALANCED_AST_WEIGHTS, BALANCED_REPLAY_WEIGHTS)
+    data_dir = Path(data_dir)
+    meta_path = data_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    ast_section = meta.get("reason_bootstrap_v45") or {}
+    sft_section = meta.get("sft_v45") or {}
+    if ast_section.get("recipe") != RECIPE_NAME:
+        raise ValueError("prépare d'abord la recette reason45 et ses bins AST")
+    sft_capabilities = sft_section.get("capabilities") or {}
+
+    capabilities: dict[str, dict] = {}
+    for objective, weight in BALANCED_AST_WEIGHTS.items():
+        name = f"ast_{objective}"
+        if name not in ast_section["capabilities"]:
+            raise ValueError(f"capacité AST absente : {name}")
+        capability = dict(ast_section["capabilities"][name])
+        capability["sampling_weight"] = weight
+        capabilities[name] = capability
+    for name, weight in BALANCED_REPLAY_WEIGHTS.items():
+        if name not in sft_capabilities:
+            raise ValueError(f"capacité de rétention v4.5 absente : {name}")
+        capability = dict(sft_capabilities[name])
+        capability["sampling_weight"] = weight
+        capability["replay_source"] = "sft_v45"
+        capabilities[f"replay_{name}"] = capability
+
+    report = {
+        "recipe": BALANCED_RECIPE_NAME,
+        "source_recipe": RECIPE_NAME,
+        "seed": ast_section["seed"],
+        "examples": ast_section["examples"],
+        "max_conversation_tokens": ast_section["max_conversation_tokens"],
+        "sequence_isolation_required": True,
+        "train_path": ast_section["train_path"],
+        "train_tokens": ast_section["train_tokens"],
+        "val_path": ast_section["val_path"],
+        "val_tokens": ast_section["val_tokens"],
+        "actual_supervised_tokens": ast_section["actual_supervised_tokens"],
+        "ast_fraction": sum(BALANCED_AST_WEIGHTS.values()),
+        "retention_fraction": sum(BALANCED_REPLAY_WEIGHTS.values()),
+        "eval_per_split": ast_section["eval_per_split"],
+        "eval_manifests": ast_section["eval_manifests"],
+        "operator_signatures_train": ast_section["operator_signatures_train"],
+        "operator_signatures_structure_holdout": (
+            ast_section["operator_signatures_structure_holdout"]
+        ),
+        "structure_overlap": ast_section["structure_overlap"],
+        "capabilities": capabilities,
+    }
+    meta["reason_bootstrap_v45b"] = report
+    tmp_meta = data_dir / "meta.json.reason-v45b.tmp"
+    tmp_meta.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_meta.replace(meta_path)
     return report

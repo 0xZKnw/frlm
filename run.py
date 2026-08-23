@@ -251,21 +251,23 @@ class Trainer:
         self.mid_curriculum: list[tuple[float, str, D.BinCorpus]] = []
         sft_recipe = cfg.sft_recipe.casefold().replace("v", "").replace(".", "")
         if masked and sft_recipe:
-            if sft_recipe not in ("44", "45", "reason45"):
+            if sft_recipe not in ("44", "45", "reason45", "reason45b"):
                 sys.exit(f"[!] Recette SFT inconnue : {cfg.sft_recipe}")
             try:
-                key = ("reason_bootstrap_v45" if sft_recipe == "reason45"
-                       else f"sft_v{sft_recipe}")
+                key = ({"reason45": "reason_bootstrap_v45",
+                        "reason45b": "reason_bootstrap_v45b"}.get(
+                            sft_recipe, f"sft_v{sft_recipe}"))
                 expected_recipe = {
                     "44": "v4.4-balanced-capabilities-18m",
                     "45": "v4.5-audited-isolated-24m",
                     "reason45": "v4.5-reason-bootstrap-ast-1",
+                    "reason45b": "v4.5-reason-bootstrap-balanced-2",
                 }[sft_recipe]
                 section = json.loads((data_dir / "meta.json").read_text(
                     encoding="utf-8"))[key]
                 if section["recipe"] != expected_recipe:
                     raise ValueError(f"recette inattendue : {section['recipe']}")
-                isolated = sft_recipe in ("45", "reason45")
+                isolated = sft_recipe in ("45", "reason45", "reason45b")
                 corpus_cls = D.ConversationCorpus if isolated else D.BinCorpus
                 corpora = []
                 for name, capability in section["capabilities"].items():
@@ -298,8 +300,9 @@ class Trainer:
                     self.val_data = D.BinCorpus(data_dir / section["val_path"],
                                                 cfg.seq_len, with_mask=True)
             except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                command = ("prepare-reason-bootstrap-v45" if sft_recipe == "reason45"
-                           else f"prepare-sft-v{sft_recipe}")
+                command = ({"reason45": "prepare-reason-bootstrap-v45",
+                            "reason45b": "prepare-reason-bootstrap-v45b"}.get(
+                                sft_recipe, f"prepare-sft-v{sft_recipe}"))
                 sys.exit(f"[!] Données SFT {cfg.sft_recipe} absentes ou incohérentes ({exc}). "
                          f"Lance : python run.py {command} --data-dir data-v4")
             total_weight = sum(weight for _, _, weight in corpora)
@@ -339,8 +342,8 @@ class Trainer:
             self.val_data = D.BinCorpus(val_bin, cfg.seq_len, with_mask=masked)
         self.replay_train = self.replay_val = None
         if masked:
-            if sft_recipe == "reason45" and cfg.replay_frac > 0:
-                sys.exit("[!] reason45 contient déjà 20 % de rétention SFT ; utilise "
+            if sft_recipe in ("reason45", "reason45b") and cfg.replay_frac > 0:
+                sys.exit(f"[!] {sft_recipe} contient déjà sa rétention SFT ; utilise "
                          "--replay-frac 0 pour ne pas compter le replay deux fois")
             if not self.val_sources:
                 for source_path in sorted(data_dir.glob("sft_val_*.bin")):
@@ -1211,7 +1214,7 @@ def add_train_args(p):
     p.add_argument("--mid-curriculum", default="",
                    help="pour la phase mid : v4.3 active les bins curriculum 80/20")
     p.add_argument("--sft-recipe", default="",
-                   help="SFT : v4.4/v4.5 ou reason45 (bootstrap AST + rétention)")
+                   help="SFT : v4.4/v4.5, reason45 ou reason45b (bootstrap équilibré)")
     p.add_argument("--no-compile", dest="compile", action="store_false",
                    help="désactive torch.compile (actif par défaut : +94%% de débit ; "
                         "retombe tout seul en mode non compilé si triton manque)")
@@ -1318,6 +1321,10 @@ def main():
     p.add_argument("--seq-len", type=int, default=256)
     p.add_argument("--eval-per-split", type=int, default=120)
     p.add_argument("--seed", type=int, default=455500)
+
+    p = sub.add_parser("prepare-reason-bootstrap-v45b",
+                       help="publie le mix court 35 %% AST / 65 %% rétention v4.5")
+    p.add_argument("--data-dir", default="data-v4")
 
     p = sub.add_parser("train", help="pré-entraînement")
     add_train_args(p)
@@ -1579,6 +1586,15 @@ def main():
         print(json.dumps(rep, indent=2, ensure_ascii=False))
         print("\nAudit obligatoire : python -m frlm.audit_reason_bootstrap_v45 "
               "--data-dir data-v4")
+
+    elif args.cmd == "prepare-reason-bootstrap-v45b":
+        from frlm.reason_bootstrap_v45 import prepare_balanced
+
+        rep = prepare_balanced(Path(args.data_dir))
+        print("\n=== Bootstrap raisonnement v4.5 équilibré prêt ===")
+        print(json.dumps(rep, indent=2, ensure_ascii=False))
+        print("\nAudit obligatoire : python -m frlm.audit_reason_bootstrap_v45 "
+              "--data-dir data-v4 --recipe reason45b")
 
     elif args.cmd == "prepare" and args.rebin:
         rep = D.rebin_mid_sft(Path(args.data_dir), mid_frac=args.mid_frac,

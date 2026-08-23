@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 
 from frlm.reason_bootstrap_v45 import (
-    EVAL_SPLITS, evaluate_ast, make_example, operator_signature,
+    BALANCED_AST_WEIGHTS, BALANCED_REPLAY_WEIGHTS, EVAL_SPLITS,
+    evaluate_ast, make_example, operator_signature,
 )
 
 
@@ -48,6 +49,13 @@ class ReasonBootstrapV45Tests(unittest.TestCase):
         text = " ".join(make_example(1_000_000 + index, "train")["prompt"].casefold()
                         for index in range(300))
         self.assertFalse(any(term in text for term in forbidden))
+
+    def test_mix_equilibre_conserve_une_majorite_de_retention(self):
+        ast = sum(BALANCED_AST_WEIGHTS.values())
+        replay = sum(BALANCED_REPLAY_WEIGHTS.values())
+        self.assertAlmostEqual(ast + replay, 1.0)
+        self.assertAlmostEqual(ast, 0.35)
+        self.assertAlmostEqual(replay, 0.65)
 
 
 if __name__ == "__main__":

@@ -111,8 +111,9 @@ def _required_files(cmd: str, root: Path = Path("/root/app")) -> tuple[str | Non
                     data_dir / "mid_v43_stage1_train.bin",
                     data_dir / "mid_v43_stage2_train.bin",
                     data_dir / "mid_v43_val.bin"]
-    elif stage == "sft" and sft_recipe in ("44", "45", "reason45"):
-        prefix = "reason_v45" if sft_recipe == "reason45" else f"sft_v{sft_recipe}"
+    elif stage == "sft" and sft_recipe in ("44", "45", "reason45", "reason45b"):
+        prefix = ("reason_v45" if sft_recipe in ("reason45", "reason45b")
+                  else f"sft_v{sft_recipe}")
         required = [data_dir / "tokenizer.json", data_dir / "sft_v44_train.bin",
                     data_dir / "sft_v44_val.bin"] if sft_recipe == "44" else [
                         data_dir / "tokenizer.json", data_dir / f"{prefix}_train.bin",
@@ -123,7 +124,7 @@ def _required_files(cmd: str, root: Path = Path("/root/app")) -> tuple[str | Non
         required = [data_dir / "tokenizer.json", data_dir / f"{prefix}train.bin",
                     data_dir / f"{prefix}val.bin"]
     if stage == "sft":
-        mask_prefix = ("reason_v45" if sft_recipe == "reason45" else
+        mask_prefix = ("reason_v45" if sft_recipe in ("reason45", "reason45b") else
                        f"sft_v{sft_recipe}" if sft_recipe in ("44", "45") else "sft")
         required += [data_dir / f"{mask_prefix}_train.mask",
                      data_dir / f"{mask_prefix}_val.mask"]
@@ -166,9 +167,9 @@ def _check_command(cmd: str) -> None:
     sft_recipe = sft_recipe.replace("v", "").replace(".", "")
     replay_default = "0.15" if stage == "sft" else "0"
     replay_frac = float(_arg(parts, "--replay-frac", replay_default) or replay_default)
-    if stage == "sft" and sft_recipe == "reason45" and replay_frac != 0:
+    if stage == "sft" and sft_recipe in ("reason45", "reason45b") and replay_frac != 0:
         raise RuntimeError(
-            "La recette reason45 contient déjà 20 % de rétention supervisée. "
+            f"La recette {sft_recipe} contient déjà sa rétention supervisée. "
             "Ajoute `--replay-frac 0` pour éviter un double replay. Aucun GPU n'a été alloué."
         )
     missing = [path for path in required if not path.is_file() or path.stat().st_size == 0]
@@ -193,14 +194,16 @@ def _check_command(cmd: str) -> None:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             sft_recipe = (_arg(shlex.split(cmd), "--sft-recipe", "") or "")
             sft_recipe = sft_recipe.casefold().replace("v", "").replace(".", "")
-            if stage == "sft" and sft_recipe in ("44", "45", "reason45"):
+            if stage == "sft" and sft_recipe in ("44", "45", "reason45", "reason45b"):
                 expected_recipe = {
                     "44": "v4.4-balanced-capabilities-18m",
                     "45": "v4.5-audited-isolated-24m",
                     "reason45": "v4.5-reason-bootstrap-ast-1",
+                    "reason45b": "v4.5-reason-bootstrap-balanced-2",
                 }[sft_recipe]
-                key = ("reason_bootstrap_v45" if sft_recipe == "reason45"
-                       else f"sft_v{sft_recipe}")
+                key = ({"reason45": "reason_bootstrap_v45",
+                        "reason45b": "reason_bootstrap_v45b"}.get(
+                            sft_recipe, f"sft_v{sft_recipe}"))
                 if (meta.get(key) or {}).get("recipe") != expected_recipe:
                     raise ValueError(f"meta.json ne décrit pas la recette {sft_recipe}")
             elif stage == "sft" and (meta.get("sft") or {}).get("recipe") != "v4.2-quality-replay":
@@ -217,9 +220,10 @@ def _check_command(cmd: str) -> None:
                 expected[data_dir / section["validation"]["path"]] = (
                     int(section["validation"]["val_tokens"]) * 2
                 )
-            elif stage == "sft" and sft_recipe in ("44", "45", "reason45"):
-                key = ("reason_bootstrap_v45" if sft_recipe == "reason45"
-                       else f"sft_v{sft_recipe}")
+            elif stage == "sft" and sft_recipe in ("44", "45", "reason45", "reason45b"):
+                key = ({"reason45": "reason_bootstrap_v45",
+                        "reason45b": "reason_bootstrap_v45b"}.get(
+                            sft_recipe, f"sft_v{sft_recipe}"))
                 section = meta[key]
                 expected = {
                     data_dir / section["train_path"]: int(section["train_tokens"]) * 2,

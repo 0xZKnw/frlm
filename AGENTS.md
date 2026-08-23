@@ -185,6 +185,23 @@ propre. Pour une seconde recette, réduire fortement les sorties numériques et 
 des programmes symboliques/état à cibles textuelles ainsi que plus de rétention ; ne
 pas lancer directement RLVR sur le best 120 pur.
 
+La seconde recette courte est `reason45b`. Elle ne régénère aucun corpus : elle
+réutilise les bins vérifiés de `reason45`, mais les échantillonne à 35 % avec 65 %
+de rétention v4.5 diversifiée. Elle repart toujours du SFT original avec un AdamW
+neuf, LR `3e-6`, 120 steps et `--replay-frac 0` :
+
+```powershell
+python run.py prepare-reason-bootstrap-v45b --data-dir data-v4
+python -m frlm.audit_reason_bootstrap_v45 --data-dir data-v4 --recipe reason45b
+python run.py sft --data-dir data-v4 --run fr-v4-v45-reason-balanced --preset v4-base --sft-recipe reason45b --seq-len 256 --batch-size 128 --grad-accum 4 --max-steps 120 --optimizer adamw --lr 3e-6 --weight-decay 0.01 --schedule cosine --warmup 8 --min-lr-frac 0.10 --replay-frac 0 --eval-every 20 --eval-iters 39 --sample-every 20 --save-every 40 --ckpt-every-min 10000 --keep-last 6 --resume runs/fr-v4-v45-sft/sft/ckpt_best.pt --init-weights-only
+```
+
+Le run H100 a fini à 15,73M tokens ; le best est le step 120 (val `0,22492`).
+Sur le même sous-ensemble AST que `reason45`, il obtient 10/30 greedy et 15/30
+pass@4 contre 11/30 et 17/30, tout en remontant OOD v2 de 2/40 à 4/40 corrigé.
+Le profil AST élargi donne 22/90 greedy et 34/90 pass@4. Préférer ce checkpoint
+équilibré au best pur `reason45` comme point de départ d'un futur RLVR gardé.
+
 Le post-training local suivant reste nommé **v4.5** ; réserver `v5` à un futur
 pré-entraînement neuf. Le pipeline corrigé ne remplace pas les anciens `rl.py` et
 `rlaif.py`, afin de garder leurs runs reproductibles :
