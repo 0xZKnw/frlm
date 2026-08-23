@@ -432,12 +432,35 @@ class TaskTests(unittest.TestCase):
             trainer.profile = None
             trainer._evaluate = Mock(return_value={"macro": 31 / 60, "rows": []})
             trainer._save = Mock()
+            trainer._materialize_phase_anchor = Mock()
+            trainer.capability_peaks = {"grounded": 1.0, "state_tracking": 0.9}
+            trainer.recovery_count = 2
             with patch("builtins.print"):
                 trainer.train()
             self.assertAlmostEqual(trainer.best_score, 31 / 60)
             self.assertFalse(trainer._resume_revalidate)
             self.assertTrue((Path(directory) / "eval_resume_000050.json").is_file())
+            trainer._materialize_phase_anchor.assert_called_once_with()
+            self.assertEqual(trainer.recovery_count, 0)
+            self.assertEqual(trainer.capability_peaks, {})
             trainer._save.assert_called_once_with(best=False)
+
+    def test_ancre_de_phase_remplace_physiquement_le_vieux_best(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = RLVRTrainer.__new__(RLVRTrainer)
+            trainer.stage_dir = Path(directory)
+            trainer.cfg = RLVRConfig(keep_last=2)
+            trainer.update = 200
+            trainer._checkpoint_payload = Mock(return_value={"accepted_updates": 200})
+            torch.save({"accepted_updates": 185}, trainer.stage_dir / "ckpt_best.pt")
+
+            trainer._materialize_phase_anchor()
+
+            for name in ("ckpt_best.pt", "ckpt_latest.pt", "ckpt_phase_anchor.pt"):
+                checkpoint = torch.load(
+                    trainer.stage_dir / name, map_location="cpu", weights_only=False
+                )
+                self.assertEqual(checkpoint["accepted_updates"], 200)
 
     def test_reprise_ancienne_isole_la_branche_de_metriques_abandonnee(self):
         with tempfile.TemporaryDirectory() as directory:

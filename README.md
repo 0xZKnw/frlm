@@ -410,6 +410,9 @@ Every resumed run now treats the resumed best as a new frozen fp32 teacher by de
 for historical experiments. Before optimization, the CLI automatically creates or
 reuses `profile_phase2.json`, a pass@6/pass@32 profile tied to that exact checkpoint,
 and performs a fresh greedy evaluation to establish the macro and per-capability peaks.
+After this revalidation, the resumed weights are atomically materialized as both
+`ckpt_phase_anchor.pt` and the new physical `ckpt_best.pt`. Consequently, an automatic
+rollback cannot silently jump to a best file left behind by the preceding phase.
 The old SFT profile hash is accepted only when the replacement profile identifies the
 same resumed stage and update.
 

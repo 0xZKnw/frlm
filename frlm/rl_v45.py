@@ -347,6 +347,12 @@ class RLVRTrainer:
         for old in numbered_files[:-self.cfg.keep_last]:
             old.unlink(missing_ok=True)
 
+    def _materialize_phase_anchor(self):
+        """Fige le checkpoint revalidé comme ancre physique et nouveau best de phase."""
+        self._save(best=True)
+        numbered = self.stage_dir / f"ckpt_{self.update:06d}.pt"
+        _atomic_link(numbered, self.stage_dir / "ckpt_phase_anchor.pt")
+
     def _resume(self, spec: str):
         path = resolve_checkpoint(self.run_dir, self.cfg.stage_name, spec)
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
@@ -932,15 +938,23 @@ class RLVRTrainer:
         elif self._resume_revalidate:
             resumed_eval = self._evaluate()
             self.best_score = resumed_eval["macro"]
+            # Une nouvelle recette/profil définit une nouvelle phase. Les floors et
+            # le fichier utilisé par les rollbacks doivent partir du checkpoint
+            # effectivement revalidé, pas d'un ancien ckpt_best resté sur disque.
+            self.capability_peaks = {}
             self._record_best_capabilities(resumed_eval)
             (self.stage_dir / f"eval_resume_{self.update:06d}.json").write_text(
                 json.dumps(resumed_eval, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             self._resume_revalidate = False
+            self.recovery_count = 0
+            self._materialize_phase_anchor()
             detail = ", ".join(f"{key}={value:.1f}"
                                for key, value in self.best_per_capability.items())
             print(f"[i] Checkpoint revalidé avec {VERIFIER_VERSION} : "
                   f"macro {self.best_score:.3f} · {detail}")
+            print(f"[i] Nouvelle ancre physique : ckpt_phase_anchor.pt et ckpt_best.pt "
+                  f"→ update {self.update}")
         print(f"[i] RLVR v4.5 local · cible {self.cfg.accepted_updates} updates acceptées · "
               f"{self.cfg.prompts_per_update}×{self.cfg.group_size} rollouts · lr {self.cfg.lr:.1e}")
         ref_meta = getattr(self, "ref_meta", {})

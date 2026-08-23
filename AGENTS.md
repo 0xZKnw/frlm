@@ -183,6 +183,11 @@ dynamiques à pass@32 reçoivent des rollouts RL ; les 0/32 restent dans le brid
 Pondérer les frontières par le déficit de leur capacité et conserver une rétention
 équilibrée pour les capacités acquises.
 
+Après la réévaluation d'une reprise avec un nouveau profil/verifier, matérialiser
+atomiquement ce checkpoint dans `ckpt_phase_anchor.pt` et `ckpt_best.pt`, puis remettre
+les pics par capacité sur cette baseline. Un rollback ne doit jamais résoudre un
+`ckpt_best.pt` physique hérité de la phase précédente.
+
 La branche longue initiale a culminé au step 60 à 0,550 (33/60), puis oscillé à
 27/60, 32/60 et 29/60 aux steps 70/80/90 avec des KL ponctuelles de 0,09 à 0,14.
 Pour une reprise stabilisée, repartir de `best` au step 60, réinitialiser AdamW,
