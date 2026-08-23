@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from collections import Counter, deque
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
@@ -14,7 +15,7 @@ from frlm.dpo_v45 import _load_pairs
 from frlm.rlaif_offline_v45 import _read_prompts, import_scores
 from frlm.posttrain_gates_v45 import evaluate_gates
 from frlm.rl_profile_v45 import _summary
-from frlm.rl_v45 import RLVRConfig, RLVRTrainer, _canonical_answer
+from frlm.rl_v45 import RLVRConfig, RLVRTrainer, _canonical_answer, _prepare_resume_profile
 from frlm.rl_tasks_v45 import SCHEMAS_BY_CAPABILITY, make_task
 from frlm.verifiers_v45 import VERIFIER_VERSION, AnswerSpec, final_text, verify
 
@@ -200,6 +201,61 @@ class TaskTests(unittest.TestCase):
                          {capability: 2 for capability in SCHEMAS_BY_CAPABILITY})
         self.assertNotEqual(tasks[0].schema_id, tasks[6].schema_id)
 
+    def test_phase2_concentre_les_rollouts_sur_le_deficit(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.cfg = RLVRConfig()
+        trainer.frontier_specs = [
+            {"key": "fort", "capability": "grounded", "schema_id": "grounded_rooms",
+             "difficulty": 0.3, "weight": 0.2},
+            {"key": "faible", "capability": "reasoning_program",
+             "schema_id": "linear_equation", "difficulty": 0.3, "weight": 0.2},
+        ]
+        trainer.frontier_scales = {"fort": 1.0, "faible": 1.0}
+        trainer.best_per_capability = {"grounded": 1.0, "reasoning_program": 0.0}
+        trainer.difficulty = {"reasoning_program": 0.25}
+        trainer.rng = random.Random(45)
+        trainer.rollout_index = 0
+        sampled = [trainer._next_task().capability for _ in range(200)]
+        self.assertGreater(sampled.count("reasoning_program"), 185)
+
+    def test_gate_par_capacite_protege_les_pics(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.cfg = RLVRConfig(max_capability_drop=0.10)
+        trainer.capability_peaks = {"grounded": 1.0, "state_tracking": 0.3}
+        ok, failures = trainer._capability_gate({
+            "per_capability": {"grounded": 0.8, "state_tracking": 0.2}
+        })
+        self.assertFalse(ok)
+        self.assertEqual(failures, {"grounded": (0.8, 0.9)})
+
+    def test_profil_phase2_correspond_au_checkpoint_repris(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.cfg = RLVRConfig(anchor_resume_reference=True)
+        trainer.profile = {"checkpoint": {"stage": "rlvr-v45", "step": 60}}
+        self.assertTrue(trainer._profile_matches_checkpoint({
+            "stage": "rlvr-v45", "accepted_updates": 60,
+        }))
+        self.assertFalse(trainer._profile_matches_checkpoint({
+            "stage": "rlvr-v45", "accepted_updates": 70,
+        }))
+
+    def test_reprofilage_automatique_cible_le_best_repris(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory) / "run" / "rlvr-v45"
+            stage.mkdir(parents=True)
+            torch.save({"stage": "rlvr-v45", "step": 60, "accepted_updates": 60},
+                       stage / "ckpt_best.pt")
+            args = SimpleNamespace(
+                resume="best", keep_reference=False, profile_name="",
+                no_refresh_profile=False, out_dir=directory, run="run",
+                stage_name="rlvr-v45", data_dir="data-v4", eval_tasks=60,
+                max_new=112, device="cpu",
+            )
+            with patch("frlm.rl_profile_v45.profile") as generate:
+                name = _prepare_resume_profile(args)
+            self.assertEqual(name, "profile_phase2.json")
+            self.assertEqual(generate.call_args.args[3:5], ("rlvr-v45", "best"))
+
     def test_controle_kl_reduit_le_lr_apres_trois_excursions(self):
         trainer = RLVRTrainer.__new__(RLVRTrainer)
         trainer.cfg = RLVRConfig(kl_excursion_patience=3)
@@ -265,6 +321,41 @@ class TaskTests(unittest.TestCase):
         self.assertFalse(trainer._dev_regression(31 / 60))
         self.assertFalse(trainer._dev_regression(30 / 60))
         self.assertTrue(trainer._dev_regression(29 / 60))
+
+    def test_regression_rollback_vers_best_et_durcit_la_reprise(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = RLVRTrainer.__new__(RLVRTrainer)
+            trainer.cfg = RLVRConfig(min_lr_scale=0.125, max_auto_recoveries=2)
+            trainer.run_dir = Path(directory) / "run"
+            trainer.stage_dir = trainer.run_dir / "rlvr-v45"
+            trainer.stage_dir.mkdir(parents=True)
+            trainer.metrics_path = trainer.stage_dir / "metrics.jsonl"
+            trainer.metrics_path.write_text(
+                json.dumps({"update": 60}) + "\n" + json.dumps({"update": 80}) + "\n",
+                encoding="utf-8",
+            )
+            trainer.model = torch.nn.Linear(2, 1)
+            best_state = {key: value.detach().clone()
+                          for key, value in trainer.model.state_dict().items()}
+            torch.save({"model": best_state, "accepted_updates": 60},
+                       trainer.stage_dir / "ckpt_best.pt")
+            trainer.optimizer = torch.optim.AdamW(trainer.model.parameters())
+            trainer.update = 80
+            trainer.lr_scale = 0.5
+            trainer.kl_beta = 0.1
+            trainer.kl_excursions = 2
+            trainer.replay_scale = 1.0
+            trainer.recovery_count = 0
+            with patch("builtins.print"):
+                self.assertTrue(trainer._recover_from_best("dev_regression"))
+            self.assertEqual(trainer.update, 60)
+            self.assertEqual(trainer.optimizer_start_update, 60)
+            self.assertEqual(trainer.lr_scale, 0.25)
+            self.assertEqual(trainer.replay_scale, 1.25)
+            self.assertEqual(trainer.recovery_count, 1)
+            kept = [json.loads(line)["update"]
+                    for line in trainer.metrics_path.read_text().splitlines()]
+            self.assertEqual(kept, [60])
 
     def test_reprise_checkpoint_pilote_sans_etat_frontiere(self):
         trainer = RLVRTrainer.__new__(RLVRTrainer)

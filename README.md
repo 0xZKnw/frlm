@@ -356,12 +356,13 @@ python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 \
   --updates 10 --prompts 3 --group 6 --max-new 112 --micro-bs 2 \
   --lr 2e-6 --kl-beta 0.018 --kl-target 0.012 --replay-weight 0.05 \
   --eval-tasks 60
-# Stable continuation from the fixed-dev best checkpoint.
+# Automatic phase 2 from the fixed-dev best checkpoint.
 python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 \
   --updates 200 --resume best --reset-optimizer --lr 5e-7 \
   --kl-beta 0.10 --kl-beta-max 1.0 --kl-target 0.012 \
   --kl-soft-max 0.05 --kl-hard-max 0.12 --replay-weight 0.15 \
-  --max-dev-drop 0.05
+  --retention-kl-weight 0.05 --eval-every 5 --max-dev-drop 0.05 \
+  --max-capability-drop 0.10 --max-auto-recoveries 6
 ```
 
 The first 10-update RTX 4060 pilot improved the fixed 60-task greedy macro from
@@ -398,9 +399,31 @@ KL up to 0.05 is normal, 0.05--0.12 is a warning zone, and only values above 0.1
 are rejected immediately. Warning-zone updates snapshot policy and Adam exactly on
 CPU, measure KL again after `optimizer.step()`, and restore both if the hard boundary
 is crossed. Three nearby excursions halve LR automatically. A fixed-dev loss greater
-than 0.05 stops cleanly while preserving `ckpt_best`. Transaction snapshots are only
+than 0.05 triggers recovery from `ckpt_best`. Transaction snapshots are only
 created in the warning zone because they require roughly one checkpoint worth of CPU
-RAM and add latency.
+RAM and add latency. A first stabilized attempt still used `sft/best` as its frozen
+reference; it reached update 80 at 29/60 and correctly tripped the macro gate, but this
+revealed that phase 2 was being pulled back toward the weaker SFT policy.
+
+Every resumed run now treats the resumed best as a new frozen fp32 teacher by default.
+`--resume` without a value means `best`; `--keep-reference` is the explicit escape hatch
+for historical experiments. Before optimization, the CLI automatically creates or
+reuses `profile_phase2.json`, a pass@6/pass@32 profile tied to that exact checkpoint,
+and performs a fresh greedy evaluation to establish the macro and per-capability peaks.
+The old SFT profile hash is accepted only when the replacement profile identifies the
+same resumed stage and update.
+
+Phase-2 on-policy sampling contains only measured `0 < pass@32 < 32` frontiers. Its
+weight is multiplied by the squared capability deficit, so grounded/code/uncertainty
+at 10/10 receive almost no RL budget while reasoning/constraints/state are targeted.
+Schemas at 0/32 never waste a GRPO group: they alternate with balanced all-capability
+retention in canonical supervised replay. Replay also carries a selected-token KL to
+the frozen resumed teacher (`retention_kl_weight=0.05`). Evaluation runs every five
+accepted updates. A checkpoint becomes best only if its macro improves without falling
+more than 1/10 below any historical capability peak. A macro loss over 3/60 or a floor
+violation rolls policy and Adam back to `ckpt_best`, halves LR, raises beta, strengthens
+replay and continues automatically. Six unsuccessful recovery branches are allowed;
+after that safety budget, training exits on `ckpt_best` rather than saving a bad branch.
 
 The frozen reference is intentionally fp32. A real RTX 4060 smoke test measured an
 initial token KL of about **0.96** with a bf16 reference despite identical source

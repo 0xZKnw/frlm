@@ -1362,6 +1362,8 @@ def main():
     p.add_argument("--init-ckpt", default="best")
     p.add_argument("--ref-stage", default="sft")
     p.add_argument("--ref-ckpt", default="best")
+    p.add_argument("--profile-name", default="",
+                   help="profil RLVR; en reprise, profile_phase2.json par défaut")
     p.add_argument("--updates", type=int, default=200,
                    help="nombre de mises à jour contenant exactement --prompts groupes dynamiques")
     p.add_argument("--prompts", type=int, default=3)
@@ -1377,18 +1379,26 @@ def main():
     p.add_argument("--kl-excursion-patience", type=int, default=3)
     p.add_argument("--min-lr-scale", type=float, default=0.125)
     p.add_argument("--replay-weight", type=float, default=0.15)
+    p.add_argument("--retention-kl-weight", type=float, default=0.05)
     p.add_argument("--oversample", type=float, default=4.0)
-    p.add_argument("--eval-every", type=int, default=10)
+    p.add_argument("--eval-every", type=int, default=5)
     p.add_argument("--eval-tasks", type=int, default=60)
     p.add_argument("--save-every", type=int, default=10)
     p.add_argument("--max-kl-rejections", type=int, default=12)
     p.add_argument("--max-dev-drop", type=float, default=0.05)
+    p.add_argument("--max-capability-drop", type=float, default=0.10)
+    p.add_argument("--max-auto-recoveries", type=int, default=6)
     p.add_argument("--seed", type=int, default=455100)
     p.add_argument("--device", default="cuda")
     p.add_argument("--allow-no-profile", action="store_true")
+    p.add_argument("--keep-reference", action="store_true",
+                   help="conserve --ref-stage/--ref-ckpt au lieu d'ancrer la KL sur le checkpoint repris")
+    p.add_argument("--no-refresh-profile", action="store_true",
+                   help="désactive le reprofilage pass@32 automatique d'une reprise")
     p.add_argument("--reset-optimizer", action="store_true",
                    help="réinitialise AdamW et le contrôle KL lors d'une reprise")
-    p.add_argument("--resume", nargs="?", const="latest", default=None)
+    p.add_argument("--resume", nargs="?", const="best", default=None,
+                   help="reprend un checkpoint; sans valeur, utilise best")
 
     p = sub.add_parser("rlaif-build-v45",
                        help="génère hors-ligne les candidats et un paquet aveugle pour le juge")

@@ -51,13 +51,14 @@ def _summary(rows: list[dict], k: int, frontier_k: int) -> dict:
 
 def profile(run: str, data_dir: str, out_dir: str, init_stage: str, init_ckpt: str,
             tasks: int, k: int, frontier_k: int, max_new: int, seed: int,
-            device: str, output: str = "profile.json", refine_from: str = "") -> dict:
+            device: str, output: str = "profile.json", refine_from: str = "",
+            output_stage: str = "rlvr-v45") -> dict:
     if k < 2 or frontier_k < k:
         raise ValueError("il faut 2 <= k <= frontier-k")
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA demandé mais indisponible")
     run_dir = Path(out_dir) / run
-    stage = run_dir / "rlvr-v45"
+    stage = run_dir / output_stage
     stage.mkdir(parents=True, exist_ok=True)
     previous = None
     if refine_from:

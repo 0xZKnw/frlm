@@ -159,7 +159,7 @@ pré-entraînement neuf. Le pipeline corrigé ne remplace pas les anciens `rl.py
 python run.py rl-profile-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage sft --init-ckpt best --tasks 60 --k 6 --frontier-k 32 --max-new 112 --output profile.json
 python run.py rl-profile-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage sft --init-ckpt best --tasks 60 --k 6 --frontier-k 32 --max-new 112 --refine-from profile.json --output profile.json
 python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage sft --init-ckpt best --ref-stage sft --ref-ckpt best --updates 10 --prompts 3 --group 6 --max-new 112 --micro-bs 2 --lr 2e-6 --kl-beta 0.018 --kl-target 0.012 --replay-weight 0.05 --eval-tasks 60
-python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 --updates 200 --resume best --reset-optimizer --lr 5e-7 --kl-beta 0.10 --kl-beta-max 1.0 --kl-target 0.012 --kl-soft-max 0.05 --kl-hard-max 0.12 --replay-weight 0.15 --max-dev-drop 0.05
+python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 --updates 200 --resume best --reset-optimizer --lr 5e-7 --kl-beta 0.10 --kl-beta-max 1.0 --kl-target 0.012 --kl-soft-max 0.05 --kl-hard-max 0.12 --replay-weight 0.15 --retention-kl-weight 0.05 --eval-every 5 --max-dev-drop 0.05 --max-capability-drop 0.10 --max-auto-recoveries 6
 python run.py rlaif-build-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage rlvr-v45 --init-ckpt best --prompts 40 --candidates 6
 python run.py rlaif-import-v45 --run fr-v4-v45-sft --scores runs/fr-v4-v45-sft/rlaif-v45/scores_a.jsonl --scores-reverse runs/fr-v4-v45-sft/rlaif-v45/scores_b.jsonl
 python run.py dpo-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage rlvr-v45 --init-ckpt best --ref-stage rlvr-v45 --ref-ckpt best --epochs 1 --grad-accum 8 --lr 5e-7 --beta 0.10
@@ -174,11 +174,14 @@ epoch on-policy. Une update acceptée contient exactement trois groupes dynamiqu
 la sélection du checkpoint utilise les 60 tâches dev. Les groupes sans aucune réussite vont dans `needs_sft.jsonl`.
 Le pilote historique utilisait un replay de 5 % ; la continuation stabilisée utilise
 0,15 avec rétention équilibrée et exemples conversationnels propres.
-Le scheduler lit et hache `profile.json` : 80 % des prompts ciblent les lignes
-dynamiques mesurées et 20 % explorent les schémas à zéro succès ou absents du petit
-profil. Ces derniers reçoivent aussi un bridge supervisé canonique dans le replay. Refuser une reprise si le hash du
-profil diffère, et ne pas remplacer ce curriculum par un tirage uniforme sans nouvelle
-mesure pass@k.
+Le premier run lit et hache `profile.json`. Une reprise utilise par défaut le checkpoint
+repris comme ancre KL fp32 et génère/réutilise automatiquement `profile_phase2.json`
+depuis ce même checkpoint. N'accepter un hash de profil différent du checkpoint que si
+le nouveau profil déclare exactement la même phase et la même update. `--keep-reference`
+est réservé aux reproductions historiques. En phase 2, seuls les schémas réellement
+dynamiques à pass@32 reçoivent des rollouts RL ; les 0/32 restent dans le bridge SFT.
+Pondérer les frontières par le déficit de leur capacité et conserver une rétention
+équilibrée pour les capacités acquises.
 
 La branche longue initiale a culminé au step 60 à 0,550 (33/60), puis oscillé à
 27/60, 32/60 et 29/60 aux steps 70/80/90 avec des KL ponctuelles de 0,09 à 0,14.
@@ -188,9 +191,16 @@ cyclique équilibrée entre les six capacités et une ligne conversationnelle cu
 Une KL <=0,05 est acceptée normalement ; entre 0,05 et 0,12, snapshotter modèle et
 Adam sur CPU, mesurer la KL post-step et restaurer les deux si elle franchit 0,12 ;
 au-delà de 0,12 avant le step, refuser sans mutation. Trois excursions rapprochées
-divisent le LR par deux. Une baisse dev stricte supérieure à 0,05 provoque un arrêt
-propre en conservant `ckpt_best`. Les snapshots transactionnels ne doivent être créés
+divisent le LR par deux. Évaluer toutes les 5 updates. Une baisse dev stricte supérieure
+à 0,05 ou une capacité plus de 0,10 sous son meilleur historique provoque un rollback
+vers `ckpt_best`, une baisse de LR, une hausse de beta et un replay renforcé, puis une
+nouvelle branche automatique. Après le budget de reprises, arrêter sur le best. Les snapshots transactionnels ne doivent être créés
 que dans la zone d'alerte car ils occupent environ la taille d'un checkpoint en RAM CPU.
+
+Le replay phase 2 alterne les bridges de déficit avec un cycle équilibré sur les six
+capacités et ajoute une KL sélectionnée sur les tokens vers le teacher figé du checkpoint
+repris. Ne jamais déplacer automatiquement cette référence après chaque nouveau best :
+elle reste l'ancre de la phase courante jusqu'à une nouvelle invocation explicite.
 
 Seul `reasoning_program` possède une difficulté scalaire réellement utilisée par le
 générateur. Pour les autres capacités, adapter en ligne le poids de chaque ligne

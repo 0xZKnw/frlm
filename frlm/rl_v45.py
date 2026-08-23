@@ -46,6 +46,8 @@ class RLVRConfig:
     init_ckpt: str = "best"
     ref_stage: str = "sft"
     ref_ckpt: str = "best"
+    profile_name: str = "profile.json"
+    anchor_resume_reference: bool = True
     accepted_updates: int = 200
     prompts_per_update: int = 3
     group_size: int = 6
@@ -63,13 +65,16 @@ class RLVRConfig:
     replay_weight: float = 0.15
     grad_clip: float = 1.0
     oversample: float = 4.0
-    eval_every: int = 10
+    eval_every: int = 5
     eval_tasks: int = 60
     save_every: int = 10
     keep_last: int = 2
     max_empty_batches: int = 20
     max_kl_rejections: int = 12
     max_dev_drop: float = 0.05
+    max_capability_drop: float = 0.10
+    retention_kl_weight: float = 0.05
+    max_auto_recoveries: int = 6
     seed: int = 455_100
     device: str = "cuda"
     require_profile: bool = True
@@ -154,6 +159,10 @@ class RLVRTrainer:
             raise ValueError("il faut kl_target < kl_soft_max < kl_hard_max")
         if cfg.kl_excursion_patience < 1 or cfg.max_kl_rejections < 1:
             raise ValueError("les patiences KL doivent être positives")
+        if not (0 <= cfg.max_capability_drop <= 1) or cfg.max_auto_recoveries < 1:
+            raise ValueError("gates de capacité ou reprises automatiques invalides")
+        if cfg.retention_kl_weight < 0:
+            raise ValueError("retention_kl_weight doit être positif")
         if cfg.device.startswith("cuda") and not torch.cuda.is_available():
             raise RuntimeError("CUDA demandé mais indisponible")
         self.device = cfg.device
@@ -161,7 +170,7 @@ class RLVRTrainer:
         self.run_dir = Path(cfg.out_dir) / cfg.run_name
         self.stage_dir = self.run_dir / cfg.stage_name
         self.stage_dir.mkdir(parents=True, exist_ok=True)
-        profile_path = self.stage_dir / "profile.json"
+        profile_path = self.stage_dir / cfg.profile_name
         if cfg.require_profile and not profile_path.is_file():
             raise RuntimeError(
                 f"profil pass@k absent : {profile_path}. Lance d'abord `python run.py rl-profile-v45`."
@@ -172,9 +181,16 @@ class RLVRTrainer:
                                if profile_path.is_file() else None)
         self.frontier_specs, self.bridge_specs = self._profile_curriculum()
         self.tok = D.load_tokenizer(resolve_tokenizer(self.run_dir, Path(cfg.data_dir)))
-        init_path = resolve_checkpoint(self.run_dir, cfg.init_stage, cfg.init_ckpt)
+        resume_path = (resolve_checkpoint(self.run_dir, cfg.stage_name, resume)
+                       if resume else None)
+        init_path = (resume_path if resume_path is not None and cfg.anchor_resume_reference
+                     else resolve_checkpoint(self.run_dir, cfg.init_stage, cfg.init_ckpt))
         self.model, self.mcfg, self.init_meta = load_policy(init_path, self.device, torch.float32)
-        if cfg.ref_stage == cfg.init_stage and cfg.ref_ckpt == cfg.init_ckpt:
+        if resume_path is not None and cfg.anchor_resume_reference:
+            self.ref = clone_reference(self.model, self.mcfg, self.device)
+            self.ref_meta = dict(self.init_meta)
+            self.ref_meta["anchor"] = "resume"
+        elif cfg.ref_stage == cfg.init_stage and cfg.ref_ckpt == cfg.init_ckpt:
             self.ref = clone_reference(self.model, self.mcfg, self.device)
             self.ref_meta = dict(self.init_meta)
         else:
@@ -187,10 +203,7 @@ class RLVRTrainer:
                 parameter.requires_grad_(False)
         self.engine = RolloutEngine(self.model, self.tok, self.device, cfg.max_new_tokens)
         self.sp = D.special_ids(self.tok)
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=cfg.lr, betas=(0.9, 0.95), eps=1e-8,
-            weight_decay=0.0, foreach=False,
-        )
+        self.optimizer = self._make_optimizer()
         self.rng = random.Random(cfg.seed)
         torch.manual_seed(cfg.seed)
         np.random.seed(cfg.seed)
@@ -205,8 +218,12 @@ class RLVRTrainer:
         self.kl_excursions = 0
         self.optimizer_start_update = 0
         self.replay_index = 0
+        self.replay_scale = 1.0
         self.best_score = -1.0
         self.baseline_score = None
+        self.best_per_capability: dict[str, float] = {}
+        self.capability_peaks: dict[str, float] = {}
+        self.recovery_count = 0
         self._resume_revalidate = False
         # Seul reasoning_program possède une difficulté sémantique graduelle.
         # Les autres familles adaptent directement le poids de leurs frontières.
@@ -227,6 +244,7 @@ class RLVRTrainer:
         (self.stage_dir / "config.json").write_text(
             json.dumps({"rlvr_v45": asdict(cfg), "model": self.mcfg.to_dict(),
                         "init": self.init_meta, "reference": self.ref_meta,
+                        "profile_name": cfg.profile_name,
                         "profile_sha256": self.profile_sha256,
                         "frontier_schemas": sorted({row["schema_id"]
                                                     for row in self.frontier_specs}),
@@ -285,6 +303,12 @@ class RLVRTrainer:
             raise RuntimeError("le profil ne contient aucun groupe dynamique : bridge SFT requis avant RL")
         return frontier, bridge
 
+    def _make_optimizer(self):
+        return torch.optim.AdamW(
+            self.model.parameters(), lr=self.cfg.lr, betas=(0.9, 0.95), eps=1e-8,
+            weight_decay=0.0, foreach=False,
+        )
+
     def _checkpoint_payload(self) -> dict:
         return {
             "model": self.model.state_dict(), "optimizers": [self.optimizer.state_dict()],
@@ -296,7 +320,11 @@ class RLVRTrainer:
             "lr_scale": self.lr_scale, "kl_excursions": self.kl_excursions,
             "optimizer_start_update": self.optimizer_start_update,
             "replay_index": self.replay_index,
+            "replay_scale": self.replay_scale,
             "best_score": self.best_score, "baseline_score": self.baseline_score,
+            "best_per_capability": self.best_per_capability,
+            "capability_peaks": self.capability_peaks,
+            "recovery_count": self.recovery_count,
             "difficulty": self.difficulty, "profile_sha256": self.profile_sha256,
             "verifier_version": VERIFIER_VERSION,
             "frontier_scales": self.frontier_scales,
@@ -324,8 +352,11 @@ class RLVRTrainer:
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         if checkpoint.get("stage") != self.cfg.stage_name:
             raise ValueError(f"mauvaise phase dans {path}")
-        if checkpoint.get("profile_sha256") not in (None, self.profile_sha256):
-            raise ValueError("le profil pass@k a changé depuis ce checkpoint RLVR")
+        profile_changed = checkpoint.get("profile_sha256") not in (None, self.profile_sha256)
+        if profile_changed and not self._profile_matches_checkpoint(checkpoint):
+            raise ValueError("le profil pass@k a changé et ne correspond pas au checkpoint repris")
+        if profile_changed:
+            print(f"[i] Profil phase 2 lié au checkpoint {checkpoint.get('accepted_updates')} accepté.")
         self.model.load_state_dict(checkpoint["model"])
         self.update = int(checkpoint["accepted_updates"])
         if self.cfg.reset_optimizer_on_resume:
@@ -342,23 +373,37 @@ class RLVRTrainer:
                          else float(checkpoint.get("lr_scale", 1.0)))
         self.kl_excursions = (0 if self.cfg.reset_optimizer_on_resume
                               else int(checkpoint.get("kl_excursions", 0)))
-        self.replay_index = int(checkpoint.get("replay_index", 0))
+        self.replay_index = (0 if profile_changed
+                             else int(checkpoint.get("replay_index", 0)))
+        self.replay_scale = (1.0 if self.cfg.reset_optimizer_on_resume
+                             else float(checkpoint.get("replay_scale", 1.0)))
         self.best_score = float(checkpoint.get("best_score", -1.0))
         self.baseline_score = checkpoint.get("baseline_score")
-        self._resume_revalidate = checkpoint.get("verifier_version") != VERIFIER_VERSION
-        saved_difficulty = checkpoint.get("difficulty", {})
-        for capability in DIFFICULTY_AWARE_CAPABILITIES:
-            if capability in saved_difficulty:
-                self.difficulty[capability] = float(saved_difficulty[capability])
-        for key, value in checkpoint.get("frontier_scales", {}).items():
-            if key in self.frontier_scales:
-                self.frontier_scales[key] = float(value)
-        for key, values in checkpoint.get("frontier_history", {}).items():
-            if key in self.frontier_history:
-                self.frontier_history[key].extend(float(value) for value in values)
-        for key, values in checkpoint.get("cap_history", {}).items():
-            if key in self.cap_history:
-                self.cap_history[key].extend(float(value) for value in values)
+        self.best_per_capability = {
+            key: float(value) for key, value in checkpoint.get("best_per_capability", {}).items()
+        }
+        self.capability_peaks = {
+            key: float(value) for key, value in checkpoint.get("capability_peaks", {}).items()
+        }
+        self.recovery_count = int(checkpoint.get("recovery_count", 0))
+        self._resume_revalidate = (
+            checkpoint.get("verifier_version") != VERIFIER_VERSION
+            or profile_changed or not self.best_per_capability
+        )
+        if not profile_changed:
+            saved_difficulty = checkpoint.get("difficulty", {})
+            for capability in DIFFICULTY_AWARE_CAPABILITIES:
+                if capability in saved_difficulty:
+                    self.difficulty[capability] = float(saved_difficulty[capability])
+            for key, value in checkpoint.get("frontier_scales", {}).items():
+                if key in self.frontier_scales:
+                    self.frontier_scales[key] = float(value)
+            for key, values in checkpoint.get("frontier_history", {}).items():
+                if key in self.frontier_history:
+                    self.frontier_history[key].extend(float(value) for value in values)
+            for key, values in checkpoint.get("cap_history", {}).items():
+                if key in self.cap_history:
+                    self.cap_history[key].extend(float(value) for value in values)
         rng = checkpoint.get("rng", {})
         if rng.get("python") is not None:
             self.rng.setstate(rng["python"])
@@ -376,8 +421,16 @@ class RLVRTrainer:
             _atomic_link(path, latest)
         print(f"[i] Reprise RLVR v4.5 : {path.name}, update {self.update}")
         if self._resume_revalidate:
-            print(f"[i] Vérificateur mis à jour vers {VERIFIER_VERSION} : "
-                  "le score du checkpoint sera recalculé avant la reprise.")
+            print(f"[i] Évaluation de reprise requise ({VERIFIER_VERSION}) : "
+                  "score et floors par capacité recalculés avant la reprise.")
+
+    def _profile_matches_checkpoint(self, checkpoint: dict) -> bool:
+        if self.profile is None or not self.cfg.anchor_resume_reference:
+            return False
+        profiled = self.profile.get("checkpoint", {})
+        return (profiled.get("stage") == checkpoint.get("stage")
+                and int(profiled.get("step", -1))
+                == int(checkpoint.get("accepted_updates", checkpoint.get("step", -2))))
 
     def _rewind_future_metrics(self):
         """Isole les métriques d'une branche abandonnée lors d'une reprise ancienne."""
@@ -408,20 +461,16 @@ class RLVRTrainer:
 
     def _next_task(self) -> TaskSpec:
         self._last_frontier_key = None
-        if self.frontier_specs and (not self.bridge_specs or self.rng.random() >= 0.20):
+        if self.frontier_specs:
             spec = self.rng.choices(
                 self.frontier_specs,
                 weights=[row["weight"] * self.frontier_scales.get(row["key"], 1.0)
+                         * self._capability_focus(row["capability"])
                          for row in self.frontier_specs], k=1,
             )[0]
             self._last_frontier_key = spec["key"]
-        elif self.bridge_specs:
-            spec = self.rng.choice(self.bridge_specs)
         else:
-            names, weights = zip(*CAPABILITY_WEIGHTS.items())
-            capability = self.rng.choices(names, weights=weights, k=1)[0]
-            spec = {"capability": capability, "schema_id": None,
-                    "difficulty": self.difficulty.get(capability, 0.25)}
+            raise RuntimeError("aucune frontière pass@32 : les schémas 0/32 doivent rester en bridge SFT")
         capability = spec["capability"]
         seed = self.cfg.seed + 1_000_000 + self.rollout_index * 31
         self.rollout_index += 1
@@ -512,6 +561,7 @@ class RLVRTrainer:
                                  for key, history in self.frontier_history.items()},
             "kl_beta": self.kl_beta, "lr_scale": self.lr_scale,
             "kl_excursions": self.kl_excursions, "replay_index": self.replay_index,
+            "replay_scale": self.replay_scale,
         }
 
     def _restore_control_state(self, state: dict):
@@ -527,6 +577,7 @@ class RLVRTrainer:
         self.lr_scale = float(state["lr_scale"])
         self.kl_excursions = int(state["kl_excursions"])
         self.replay_index = int(state["replay_index"])
+        self.replay_scale = float(state["replay_scale"])
 
     def _snapshot_train_state(self) -> dict:
         """Snapshot CPU exact, réservé aux updates dans la zone KL d'alerte."""
@@ -560,13 +611,89 @@ class RLVRTrainer:
     def _dev_regression(self, macro: float) -> bool:
         return self.best_score - macro > self.cfg.max_dev_drop + 1e-12
 
+    def _capability_focus(self, capability: str) -> float:
+        """Concentre le RL sur les déficits sans retirer totalement une frontière acquise."""
+        score = getattr(self, "best_per_capability", {}).get(capability, 0.0)
+        return max(0.02, (1.0 - score) ** 2)
+
+    def _capability_gate(self, evaluation: dict) -> tuple[bool, dict[str, tuple[float, float]]]:
+        current = evaluation.get("per_capability", {})
+        failures = {}
+        for capability, peak in getattr(self, "capability_peaks", {}).items():
+            floor = max(0.0, peak - self.cfg.max_capability_drop)
+            score = float(current.get(capability, 0.0))
+            if score + 1e-12 < floor:
+                failures[capability] = (score, floor)
+        return not failures, failures
+
+    def _record_best_capabilities(self, evaluation: dict):
+        current = {key: float(value)
+                   for key, value in evaluation.get("per_capability", {}).items()}
+        self.best_per_capability = current
+        if not hasattr(self, "capability_peaks"):
+            self.capability_peaks = {}
+        for capability, score in current.items():
+            self.capability_peaks[capability] = max(
+                score, self.capability_peaks.get(capability, 0.0)
+            )
+
+    def _recover_from_best(self, reason: str, failures: dict | None = None) -> bool:
+        """Rollback vers le best, durcit la rétention et reprend avec un LR plus petit."""
+        can_continue = self.recovery_count < self.cfg.max_auto_recoveries
+        path = resolve_checkpoint(self.run_dir, self.cfg.stage_name, "best")
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        previous_update = self.update
+        previous_scale = self.lr_scale
+        previous_beta = self.kl_beta
+        self.model.load_state_dict(checkpoint["model"])
+        self.update = int(checkpoint.get("accepted_updates", checkpoint.get("step", 0)))
+        self.optimizer = self._make_optimizer()
+        self.optimizer_start_update = self.update
+        self.lr_scale = max(self.cfg.min_lr_scale, previous_scale * 0.5)
+        self.kl_beta = min(self.cfg.kl_beta_max,
+                           max(self.cfg.kl_beta, previous_beta * 1.5))
+        self.kl_excursions = 0
+        self.replay_scale = min(2.0, self.replay_scale * 1.25)
+        if can_continue:
+            self.recovery_count += 1
+        del checkpoint
+        gc.collect()
+        self._rewind_future_metrics()
+        _atomic_link(path, self.stage_dir / "ckpt_latest.pt")
+        event = {
+            "from_update": previous_update, "to_update": self.update,
+            "reason": reason, "capability_failures": failures or {},
+            "recovery": self.recovery_count, "lr_scale": self.lr_scale,
+            "kl_beta": self.kl_beta, "replay_scale": self.replay_scale,
+        }
+        with (self.stage_dir / "recoveries.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+        print(f"[↩] Rollback automatique {previous_update} → best {self.update} "
+              f"({reason}) · reprise {self.recovery_count}/{self.cfg.max_auto_recoveries} · "
+              f"lr×{self.lr_scale:.3f} · beta {self.kl_beta:.3f} · "
+              f"replay×{self.replay_scale:.2f}")
+        if not can_continue:
+            print("[!] Budget de reprises automatiques épuisé : arrêt sur ckpt_best.")
+        return can_continue
+
     def _next_retention_task(self) -> TaskSpec:
-        """Replay équilibré par capacité, puis cyclique par schéma."""
+        """Alterne bridge des déficits et rétention équilibrée de toutes les capacités."""
         capabilities = tuple(SCHEMAS_BY_CAPABILITY)
         slot = self.replay_index
-        capability = capabilities[slot % len(capabilities)]
-        schemas = SCHEMAS_BY_CAPABILITY[capability]
-        schema = schemas[(slot // len(capabilities)) % len(schemas)]
+        bridge_specs = getattr(self, "bridge_specs", [])
+        if bridge_specs and slot % 2 == 0:
+            ordered = sorted(
+                bridge_specs,
+                key=lambda row: (-self._capability_focus(row["capability"]),
+                                 row["capability"], row["schema_id"]),
+            )
+            spec = ordered[(slot // 2) % len(ordered)]
+            capability, schema = spec["capability"], spec["schema_id"]
+        else:
+            balanced_slot = slot // 2 if bridge_specs else slot
+            capability = capabilities[balanced_slot % len(capabilities)]
+            schemas = SCHEMAS_BY_CAPABILITY[capability]
+            schema = schemas[(balanced_slot // len(capabilities)) % len(schemas)]
         seed = self.cfg.seed + 10_000_000 + slot * 37
         self.replay_index += 1
         return make_task(seed, "train", 0.35, capability, schema)
@@ -679,7 +806,8 @@ class RLVRTrainer:
             del difference, kl_tokens, pg, kl
 
         common = {"pg": pg_total, "kl": kl_total, "post_kl": None,
-                  "replay": 0.0, "grad_norm": 0.0, "lr": lr,
+                  "replay": 0.0, "retention_kl": 0.0,
+                  "grad_norm": 0.0, "lr": lr,
                   "tokens": token_count}
         if not math.isfinite(kl_total) or kl_total > self.cfg.kl_hard_max:
             self.optimizer.zero_grad(set_to_none=True)
@@ -702,21 +830,46 @@ class RLVRTrainer:
             _logits, replay_loss, _ = self.model(
                 replay_x, targets=replay_y, diagnostics=False, loss_reduction="mean"
             )
-        (self.cfg.replay_weight * replay_loss).backward()
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16,
+                                              enabled=self.use_cuda):
+            replay_ref_logits, _, _ = self.ref(replay_x, diagnostics=False)
+        replay_mask = replay_y.ne(-100)
+        replay_targets = replay_y.clamp_min(0)
+        replay_vocab = _logits.shape[-1]
+        replay_logp = -F.cross_entropy(
+            _logits.reshape(-1, replay_vocab).float(), replay_targets.reshape(-1),
+            reduction="none",
+        ).view_as(replay_targets)
+        replay_ref_logp = -F.cross_entropy(
+            replay_ref_logits.reshape(-1, replay_vocab).float(), replay_targets.reshape(-1),
+            reduction="none",
+        ).view_as(replay_targets)
+        replay_difference = replay_ref_logp - replay_logp
+        retention_tokens = replay_difference.exp() - replay_difference - 1.0
+        retention_kl = retention_tokens[replay_mask].mean()
+        (self.cfg.replay_weight * self.replay_scale * replay_loss
+         + self.cfg.retention_kl_weight * self.replay_scale * retention_kl).backward()
         grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(),
                                                          self.cfg.grad_clip))
-        if not math.isfinite(float(replay_loss.detach())) or not math.isfinite(grad_norm):
+        replay_value = float(replay_loss.detach())
+        retention_value = float(retention_kl.detach())
+        if (not math.isfinite(replay_value) or not math.isfinite(retention_value)
+                or not math.isfinite(grad_norm)):
             self.optimizer.zero_grad(set_to_none=True)
-            del replay_x, replay_y, _logits, replay_loss
+            del replay_x, replay_y, _logits, replay_loss, replay_ref_logits
+            del replay_mask, replay_targets, replay_logp, replay_ref_logp
+            del replay_difference, retention_tokens, retention_kl
             if transaction is not None:
                 del transaction
             gc.collect()
-            return {**common, "post_kl": float("nan"),
+            return {**common, "post_kl": float("nan"), "replay": replay_value,
+                    "retention_kl": retention_value,
                     "grad_norm": grad_norm, "accepted": False,
                     "reject_reason": "nonfinite_replay_or_grad"}
         self.optimizer.step()
-        replay_value = float(replay_loss.detach())
-        del replay_x, replay_y, _logits, replay_loss
+        del replay_x, replay_y, _logits, replay_loss, replay_ref_logits
+        del replay_mask, replay_targets, replay_logp, replay_ref_logp
+        del replay_difference, retention_tokens, retention_kl
         post_kl = None
         if transaction is not None:
             post_kl = self._measure_kl(batches, constant_denominator)
@@ -725,12 +878,13 @@ class RLVRTrainer:
                 del transaction
                 gc.collect()
                 return {**common, "post_kl": post_kl,
-                        "replay": replay_value,
+                        "replay": replay_value, "retention_kl": retention_value,
                         "grad_norm": grad_norm, "accepted": False,
                         "reject_reason": "kl_post_hard"}
             del transaction
             gc.collect()
         return {**common, "post_kl": post_kl, "replay": replay_value,
+                "retention_kl": retention_value,
                 "grad_norm": grad_norm, "accepted": True, "reject_reason": None}
 
     @torch.inference_mode()
@@ -769,6 +923,7 @@ class RLVRTrainer:
             baseline = self._evaluate()
             self.baseline_score = baseline["macro"]
             self.best_score = max(self.best_score, self.baseline_score)
+            self._record_best_capabilities(baseline)
             (self.stage_dir / "eval_baseline.json").write_text(
                 json.dumps(baseline, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -777,21 +932,33 @@ class RLVRTrainer:
         elif self._resume_revalidate:
             resumed_eval = self._evaluate()
             self.best_score = resumed_eval["macro"]
+            self._record_best_capabilities(resumed_eval)
             (self.stage_dir / f"eval_resume_{self.update:06d}.json").write_text(
                 json.dumps(resumed_eval, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             self._resume_revalidate = False
+            detail = ", ".join(f"{key}={value:.1f}"
+                               for key, value in self.best_per_capability.items())
             print(f"[i] Checkpoint revalidé avec {VERIFIER_VERSION} : "
-                  f"macro {self.best_score:.3f}")
+                  f"macro {self.best_score:.3f} · {detail}")
         print(f"[i] RLVR v4.5 local · cible {self.cfg.accepted_updates} updates acceptées · "
               f"{self.cfg.prompts_per_update}×{self.cfg.group_size} rollouts · lr {self.cfg.lr:.1e}")
+        ref_meta = getattr(self, "ref_meta", {})
+        print(f"[i] Ancre KL fp32 · {ref_meta.get('stage')} "
+              f"step {ref_meta.get('step')} · "
+              f"source {ref_meta.get('anchor', 'explicite')}")
         if self.profile is not None:
             frontier = ", ".join(sorted({row["schema_id"] for row in self.frontier_specs}))
             bridge = ", ".join(sorted({row["schema_id"] for row in self.bridge_specs}))
-            print(f"[i] Curriculum profilé · 80 % frontière [{frontier}] · "
-                  f"20 % exploration bridge [{bridge}]")
+            print(f"[i] Curriculum phase 2 · RL sur frontières [{frontier}] · "
+                  f"bridge supervisé seulement [{bridge}]")
             print(f"[i] Adaptation en ligne · {len(self.frontier_specs)} frontières pondérées · "
                   "difficulté sémantique : reasoning_program")
+            focus = ", ".join(
+                f"{capability}×{self._capability_focus(capability):.2f}"
+                for capability in SCHEMAS_BY_CAPABILITY
+            )
+            print(f"[i] Focus déficit · {focus}")
 
         def stop(_signum, _frame):
             self.stop_requested = True
@@ -841,8 +1008,9 @@ class RLVRTrainer:
                       f"{train_stats['post_kl'] if train_stats['post_kl'] is not None else '-'} · "
                       f"beta {self.kl_beta:.3f} · lr×{self.lr_scale:.3f}")
                 if rejected_kl_streak >= self.cfg.max_kl_rejections:
-                    print("[!] Trop de rejets KL consécutifs : arrêt propre sur le dernier état accepté.")
-                    self.stop_requested = True
+                    if not self._recover_from_best("kl_rejections"):
+                        self.stop_requested = True
+                    rejected_kl_streak = 0
                 continue
             rejected_kl_streak = 0
             observed_kl = max(train_stats["kl"], train_stats["post_kl"] or 0.0)
@@ -863,18 +1031,25 @@ class RLVRTrainer:
                 **train_stats,
             }
             is_best = False
-            stop_reason = None
+            recovery_reason = None
+            capability_failures = {}
             if self.update % self.cfg.eval_every == 0 or self.update == self.cfg.accepted_updates:
                 evaluation = self._evaluate()
                 record["eval"] = evaluation
                 safe_kl = train_stats["kl"] <= self.cfg.kl_soft_max
-                if evaluation["macro"] > self.best_score and safe_kl:
+                capability_ok, capability_failures = self._capability_gate(evaluation)
+                if evaluation["macro"] > self.best_score and safe_kl and capability_ok:
                     self.best_score = evaluation["macro"]
+                    self._record_best_capabilities(evaluation)
+                    self.recovery_count = 0
                     is_best = True
+                elif not capability_ok:
+                    recovery_reason = "capability_floor"
                 elif self._dev_regression(evaluation["macro"]):
-                    stop_reason = "dev_regression"
-                    self.stop_requested = True
-                    record["stop_reason"] = stop_reason
+                    recovery_reason = "dev_regression"
+                if recovery_reason:
+                    record["recovery_reason"] = recovery_reason
+                    record["capability_failures"] = capability_failures
                 (self.stage_dir / f"eval_{self.update:06d}.json").write_text(
                     json.dumps(evaluation, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
@@ -883,11 +1058,19 @@ class RLVRTrainer:
             print(f"update {self.update:3d}/{self.cfg.accepted_updates} · "
                   f"ok {100*success_rate:4.1f}% · groupes {len(groups)}/{int(rollout['attempts'])} · "
                   f"KL {train_stats['kl']:.4f} · replay {train_stats['replay']:.3f} · "
+                  f"retKL {train_stats['retention_kl']:.4f} · "
                   f"lr×{self.lr_scale:.3f} · "
                   f"{time.time()-started:.1f}s")
-            if stop_reason == "dev_regression":
-                print(f"[!] Régression dev : {evaluation['macro']:.3f} contre best "
-                      f"{self.best_score:.3f}. Arrêt propre ; ckpt_best est conservé.")
+            if recovery_reason:
+                if capability_failures:
+                    detail = ", ".join(
+                        f"{key}={score:.1f}<{floor:.1f}"
+                        for key, (score, floor) in capability_failures.items()
+                    )
+                    print(f"[!] Gate capacité déclenché : {detail}")
+                if not self._recover_from_best(recovery_reason, capability_failures):
+                    self.stop_requested = True
+                continue
             if is_best or self.update % self.cfg.save_every == 0 or stop_file.exists():
                 self._save(best=is_best)
             if stop_file.exists():
@@ -897,11 +1080,55 @@ class RLVRTrainer:
         print(f"[✓] RLVR v4.5 terminé/repris à l'update {self.update} : {self.stage_dir}")
 
 
+def _prepare_resume_profile(args) -> str:
+    """Crée/réutilise automatiquement un pass@32 lié au checkpoint de phase 2."""
+    if not args.resume or args.keep_reference:
+        return args.profile_name or "profile.json"
+    profile_name = args.profile_name or "profile_phase2.json"
+    if args.no_refresh_profile:
+        return profile_name
+    run_dir = Path(args.out_dir) / args.run
+    checkpoint_path = resolve_checkpoint(run_dir, args.stage_name, args.resume)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False, mmap=True)
+    expected_stage = checkpoint.get("stage")
+    expected_step = int(checkpoint.get("accepted_updates", checkpoint.get("step", -1)))
+    del checkpoint
+    profile_path = run_dir / args.stage_name / profile_name
+    if profile_path.is_file():
+        existing = json.loads(profile_path.read_text(encoding="utf-8"))
+        source = existing.get("checkpoint", {})
+        profile_cfg = existing.get("config", {})
+        same_recipe = (
+            int(profile_cfg.get("tasks", -1)) == args.eval_tasks
+            and int(profile_cfg.get("k", -1)) == 6
+            and int(profile_cfg.get("frontier_k", -1)) == 32
+            and int(profile_cfg.get("max_new", -1)) == args.max_new
+            and int(profile_cfg.get("seed", -1)) == 455_001
+        )
+        if (source.get("stage") == expected_stage
+                and int(source.get("step", -2)) == expected_step and same_recipe):
+            print(f"[i] Profil phase 2 réutilisé : {profile_path.name} (best {expected_step})")
+            return profile_name
+    print(f"[i] Reprofilage automatique pass@32 du best {expected_step} avant la phase 2.")
+    from frlm.rl_profile_v45 import profile
+    profile(
+        args.run, args.data_dir, args.out_dir, args.stage_name, args.resume,
+        args.eval_tasks, 6, 32, args.max_new, 455_001, args.device,
+        profile_name, "", args.stage_name,
+    )
+    gc.collect()
+    if args.device.startswith("cuda"):
+        torch.cuda.empty_cache()
+    return profile_name
+
+
 def cmd_rl_v45(args):
+    profile_name = _prepare_resume_profile(args)
     cfg = RLVRConfig(
         run_name=args.run, data_dir=args.data_dir, out_dir=args.out_dir,
         stage_name=args.stage_name, init_stage=args.init_stage, init_ckpt=args.init_ckpt,
         ref_stage=args.ref_stage, ref_ckpt=args.ref_ckpt,
+        profile_name=profile_name, anchor_resume_reference=not args.keep_reference,
         accepted_updates=args.updates, prompts_per_update=args.prompts,
         group_size=args.group, max_new_tokens=args.max_new, micro_bs=args.micro_bs,
         lr=args.lr, kl_beta=args.kl_beta, kl_target=args.kl_target,
@@ -909,10 +1136,13 @@ def cmd_rl_v45(args):
         kl_hard_max=args.kl_hard_max,
         kl_excursion_patience=args.kl_excursion_patience,
         min_lr_scale=args.min_lr_scale,
-        replay_weight=args.replay_weight, oversample=args.oversample,
+        replay_weight=args.replay_weight, retention_kl_weight=args.retention_kl_weight,
+        oversample=args.oversample,
         eval_every=args.eval_every, eval_tasks=args.eval_tasks,
         save_every=args.save_every, max_kl_rejections=args.max_kl_rejections,
-        max_dev_drop=args.max_dev_drop, seed=args.seed, device=args.device,
+        max_dev_drop=args.max_dev_drop, max_capability_drop=args.max_capability_drop,
+        max_auto_recoveries=args.max_auto_recoveries,
+        seed=args.seed, device=args.device,
         require_profile=not args.allow_no_profile,
         reset_optimizer_on_resume=args.reset_optimizer,
     )
