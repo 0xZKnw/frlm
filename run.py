@@ -1349,6 +1349,8 @@ def main():
     p.add_argument("--seed", type=int, default=455001)
     p.add_argument("--device", default="cuda")
     p.add_argument("--output", default="profile.json")
+    p.add_argument("--refine-from", default="",
+                   help="complète uniquement les rollouts pass@32 manquants d'un profil existant")
 
     p = sub.add_parser("rl-v45",
                        help="RLVR DrGRPO local v4.5, mémoire bornée et replay supervisé")
@@ -1361,7 +1363,7 @@ def main():
     p.add_argument("--ref-stage", default="sft")
     p.add_argument("--ref-ckpt", default="best")
     p.add_argument("--updates", type=int, default=200,
-                   help="nombre de mises à jour ayant au moins un groupe dynamique")
+                   help="nombre de mises à jour contenant exactement --prompts groupes dynamiques")
     p.add_argument("--prompts", type=int, default=3)
     p.add_argument("--group", type=int, default=6)
     p.add_argument("--max-new", type=int, default=112)
@@ -1372,7 +1374,7 @@ def main():
     p.add_argument("--replay-weight", type=float, default=0.05)
     p.add_argument("--oversample", type=float, default=4.0)
     p.add_argument("--eval-every", type=int, default=10)
-    p.add_argument("--eval-tasks", type=int, default=12)
+    p.add_argument("--eval-tasks", type=int, default=60)
     p.add_argument("--save-every", type=int, default=10)
     p.add_argument("--seed", type=int, default=455100)
     p.add_argument("--device", default="cuda")
@@ -1398,6 +1400,8 @@ def main():
     p.add_argument("--run", default="fr-v4-v45-sft")
     p.add_argument("--out-dir", default="runs")
     p.add_argument("--scores", required=True)
+    p.add_argument("--scores-reverse", required=True,
+                   help="seconde passe indépendante sur le paquet d'ordre inversé")
     p.add_argument("--min-margin", type=int, default=1)
     p.add_argument("--max-pairs", type=int, default=2)
 

@@ -73,13 +73,16 @@ def build_candidates(run: str, data_dir: str, out_dir: str, init_stage: str,
     if len(prompt_rows) < prompts:
         raise ValueError(f"seulement {len(prompt_rows)} prompts uniques disponibles")
     private_path = stage_dir / "candidates.private.jsonl"
-    judge_path = stage_dir / "judge_packet.jsonl"
+    judge_a_path = stage_dir / "judge_packet_a.jsonl"
+    judge_b_path = stage_dir / "judge_packet_b.jsonl"
     private_tmp = private_path.with_suffix(".jsonl.tmp")
-    judge_tmp = judge_path.with_suffix(".jsonl.tmp")
+    judge_a_tmp = judge_a_path.with_suffix(".jsonl.tmp")
+    judge_b_tmp = judge_b_path.with_suffix(".jsonl.tmp")
     rng = random.Random(seed + 1)
     digest = hashlib.sha256()
     with private_tmp.open("w", encoding="utf-8") as private, \
-            judge_tmp.open("w", encoding="utf-8") as judge:
+            judge_a_tmp.open("w", encoding="utf-8") as judge_a, \
+            judge_b_tmp.open("w", encoding="utf-8") as judge_b:
         for index, source in enumerate(prompt_rows):
             prompt_id = _id("p", source["source"], str(source["line"]), source["prompt"])
             task = TaskSpec(
@@ -106,42 +109,83 @@ def build_candidates(run: str, data_dir: str, out_dir: str, init_stage: str,
             line = json.dumps(private_row, ensure_ascii=False, sort_keys=True)
             private.write(line + "\n")
             digest.update(line.encode("utf-8"))
-            blind = [{"candidate_id": row["candidate_id"], "text": row["text"]}
-                     for row in candidate_rows]
-            rng.shuffle(blind)
+            blind_a = [{"candidate_id": row["candidate_id"], "text": row["text"]}
+                       for row in candidate_rows]
+            rng.shuffle(blind_a)
+            blind_b = list(reversed(blind_a))
             # Aucune réponse canonique, note Python ou provenance privée n'entre
             # dans le paquet du juge : seulement le prompt et les sorties anonymes.
-            judge.write(json.dumps({"prompt_id": prompt_id, "prompt": source["prompt"],
-                                    "candidates": blind}, ensure_ascii=False) + "\n")
+            packet = {"prompt_id": prompt_id, "prompt": source["prompt"]}
+            judge_a.write(json.dumps({**packet, "candidates": blind_a},
+                                     ensure_ascii=False) + "\n")
+            judge_b.write(json.dumps({**packet, "candidates": blind_b},
+                                     ensure_ascii=False) + "\n")
             print(f"candidats {index + 1:3d}/{prompts} · {prompt_id}")
     private_tmp.replace(private_path)
-    judge_tmp.replace(judge_path)
+    judge_a_tmp.replace(judge_a_path)
+    judge_b_tmp.replace(judge_b_path)
     instructions = stage_dir / "JUDGE_INSTRUCTIONS.md"
     instructions.write_text(
         "# Jugement RLAIF v4.5 (aveugle)\n\n"
-        "Pour chaque ligne de `judge_packet.jsonl`, classer toutes les sorties selon : "
+        "Faire deux passes indépendantes. Juger d'abord `judge_packet_a.jsonl` sans lire "
+        "le paquet B, puis juger `judge_packet_b.jsonl` dans un nouveau contexte sans relire "
+        "les résultats A. Les candidats de B sont présentés dans l'ordre inverse. Pour chaque "
+        "ligne, classer toutes les sorties selon : "
         "exactitude et ancrage factuel, respect précis de la demande, clarté/concision, "
         "absence d'invention, sécurité et absence de radotage. Ne pas favoriser une sortie "
         "pour sa longueur ou son identifiant.\n\n"
-        "Écrire `scores.jsonl`, une ligne JSON par prompt :\n\n"
+        "Écrire `scores_a.jsonl` puis `scores_b.jsonl`, une ligne JSON par prompt :\n\n"
         "```json\n{\"prompt_id\":\"p_...\",\"ranking\":[\"c_meilleur\",\"c_...\"],"
         "\"scores\":{\"c_meilleur\":4,\"c_...\":1},\"unsafe\":[],\"reason\":\"...\"}\n```\n\n"
         "Les scores sont des entiers 0..4. Une égalité doit recevoir le même score. "
         "Marquer dans `unsafe` toute sortie dangereuse ou manipulatrice.\n",
         encoding="utf-8",
     )
-    manifest = {"schema": "frlm-rlaif-candidates-v45-1", "created_unix": time.time(),
+    manifest = {"schema": "frlm-rlaif-candidates-v45-2", "created_unix": time.time(),
                 "checkpoint": metadata, "prompts": prompts, "candidates_per_prompt": candidates,
                 "seed": seed, "max_new": max_new, "sha256": digest.hexdigest(),
-                "private": str(private_path), "judge_packet": str(judge_path)}
+                "private": str(private_path), "judge_packet_a": str(judge_a_path),
+                "judge_packet_b": str(judge_b_path), "double_judgment": True}
     (stage_dir / "candidates.manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return manifest
 
 
-def import_scores(run: str, out_dir: str, scores_path: Path, min_margin: int = 1,
-                  max_pairs_per_prompt: int = 2) -> dict:
+def _read_scores(path: Path, candidates: dict, label: str) -> dict:
+    scores = {}
+    with Path(path).open(encoding="utf-8") as stream:
+        for line_no, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            prompt_id = row.get("prompt_id")
+            if prompt_id in scores:
+                raise ValueError(f"score {label} dupliqué pour {prompt_id}")
+            if prompt_id not in candidates:
+                raise ValueError(f"prompt inconnu dans {label}, ligne {line_no}: {prompt_id}")
+            scores[prompt_id] = row
+    return scores
+
+
+def _validate_judgment(judged: dict, by_id: dict, prompt_id: str, label: str):
+    ranking = judged.get("ranking") or []
+    if set(ranking) != set(by_id) or len(ranking) != len(by_id):
+        raise ValueError(f"classement {label} incomplet ou falsifié pour {prompt_id}")
+    score_map = judged.get("scores") or {}
+    if set(score_map) != set(by_id) or any(type(value) is not int or not 0 <= value <= 4
+                                           for value in score_map.values()):
+        raise ValueError(f"scores {label} invalides pour {prompt_id}")
+    if any(score_map[left] < score_map[right] for left, right in zip(ranking, ranking[1:])):
+        raise ValueError(f"classement {label} incohérent avec les scores pour {prompt_id}")
+    unsafe = set(judged.get("unsafe") or [])
+    if not unsafe.issubset(by_id):
+        raise ValueError(f"identifiant unsafe {label} inconnu pour {prompt_id}")
+    return ranking, score_map, unsafe
+
+
+def import_scores(run: str, out_dir: str, scores_path: Path, scores_reverse_path: Path,
+                  min_margin: int = 1, max_pairs_per_prompt: int = 2) -> dict:
     stage_dir = Path(out_dir) / run / "rlaif-v45"
     private_path = stage_dir / "candidates.private.jsonl"
     candidates = {}
@@ -149,43 +193,35 @@ def import_scores(run: str, out_dir: str, scores_path: Path, min_margin: int = 1
         for line in stream:
             row = json.loads(line)
             candidates[row["prompt_id"]] = row
-    scores = {}
-    with Path(scores_path).open(encoding="utf-8") as stream:
-        for line_no, line in enumerate(stream, 1):
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            prompt_id = row.get("prompt_id")
-            if prompt_id in scores:
-                raise ValueError(f"score dupliqué pour {prompt_id}")
-            if prompt_id not in candidates:
-                raise ValueError(f"prompt inconnu ligne {line_no}: {prompt_id}")
-            scores[prompt_id] = row
+    scores_a = _read_scores(Path(scores_path), candidates, "A")
+    scores_b = _read_scores(Path(scores_reverse_path), candidates, "B")
+    if set(scores_a) != set(candidates) or set(scores_b) != set(candidates):
+        raise ValueError("les deux jugements doivent couvrir exactement tous les prompts émis")
     pairs, rejected = [], []
     for prompt_id, source in candidates.items():
-        judged = scores.get(prompt_id)
-        if judged is None:
-            rejected.append({"prompt_id": prompt_id, "reason": "missing_judgment"})
-            continue
+        judged_a, judged_b = scores_a.get(prompt_id), scores_b.get(prompt_id)
         by_id = {row["candidate_id"]: row for row in source["candidates"]}
-        ranking = judged.get("ranking") or []
-        if set(ranking) != set(by_id) or len(ranking) != len(by_id):
-            raise ValueError(f"classement incomplet ou falsifié pour {prompt_id}")
-        score_map = judged.get("scores") or {}
-        if score_map and (set(score_map) != set(by_id)
-                          or any(type(value) is not int or not 0 <= value <= 4
-                                 for value in score_map.values())):
-            raise ValueError(f"scores invalides pour {prompt_id}")
-        unsafe = set(judged.get("unsafe") or [])
-        chosen = by_id[ranking[0]]
+        ranking_a, score_a, unsafe_a = _validate_judgment(judged_a, by_id, prompt_id, "A")
+        ranking_b, score_b, unsafe_b = _validate_judgment(judged_b, by_id, prompt_id, "B")
+        if ranking_a[0] != ranking_b[0]:
+            rejected.append({"prompt_id": prompt_id, "reason": "judge_top_disagreement"})
+            continue
+        unsafe = unsafe_a | unsafe_b
+        chosen = by_id[ranking_a[0]]
         if chosen["candidate_id"] in unsafe or not chosen["stopped"] or not chosen["text"]:
             rejected.append({"prompt_id": prompt_id, "reason": "chosen_invalid"})
             continue
         added = 0
-        for rejected_id in reversed(ranking[1:]):
+        losers = sorted(
+            (candidate_id for candidate_id in by_id if candidate_id != chosen["candidate_id"]),
+            key=lambda candidate_id: (score_a[candidate_id] + score_b[candidate_id],
+                                      -ranking_a.index(candidate_id) - ranking_b.index(candidate_id)),
+        )
+        for rejected_id in losers:
             loser = by_id[rejected_id]
-            margin = (score_map.get(chosen["candidate_id"], 4)
-                      - score_map.get(rejected_id, 0))
+            margin_a = score_a[chosen["candidate_id"]] - score_a[rejected_id]
+            margin_b = score_b[chosen["candidate_id"]] - score_b[rejected_id]
+            margin = min(margin_a, margin_b)
             if margin < min_margin or chosen["text"] == loser["text"]:
                 continue
             if chosen["repeat_ratio"] > 0.22 or len(chosen["text"]) > 4000:
@@ -194,7 +230,8 @@ def import_scores(run: str, out_dir: str, scores_path: Path, min_margin: int = 1
                           "prompt_id": prompt_id, "prompt": source["prompt"],
                           "category": source["category"], "chosen": chosen["text"],
                           "rejected": loser["text"], "margin": margin,
-                          "judge_reason": str(judged.get("reason") or "")[:500]})
+                          "judge_reason_a": str(judged_a.get("reason") or "")[:300],
+                          "judge_reason_b": str(judged_b.get("reason") or "")[:300]})
             added += 1
             if added >= max_pairs_per_prompt:
                 break
@@ -211,8 +248,9 @@ def import_scores(run: str, out_dir: str, scores_path: Path, min_margin: int = 1
             stream.write(line + "\n")
             digest.update(line.encode("utf-8"))
     tmp.replace(pairs_path)
-    report = {"schema": "frlm-rlaif-pairs-v45-1", "created_unix": time.time(),
-              "prompts_total": len(candidates), "judgments": len(scores),
+    report = {"schema": "frlm-rlaif-pairs-v45-2", "created_unix": time.time(),
+              "prompts_total": len(candidates), "judgments_a": len(scores_a),
+              "judgments_b": len(scores_b), "double_judgment": True,
               "pairs": len(pairs), "rejected_prompts": rejected,
               "sha256": digest.hexdigest(), "path": str(pairs_path)}
     (stage_dir / "pairs.manifest.json").write_text(
@@ -231,5 +269,5 @@ def cmd_build(args):
 
 def cmd_import(args):
     print(json.dumps(import_scores(args.run, args.out_dir, Path(args.scores),
-                                   args.min_margin, args.max_pairs),
+                                   Path(args.scores_reverse), args.min_margin, args.max_pairs),
                      ensure_ascii=False, indent=2))

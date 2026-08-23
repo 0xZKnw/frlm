@@ -55,7 +55,7 @@ class RLVRConfig:
     grad_clip: float = 1.0
     oversample: float = 4.0
     eval_every: int = 10
-    eval_tasks: int = 12
+    eval_tasks: int = 60
     save_every: int = 10
     keep_last: int = 2
     max_empty_batches: int = 20
@@ -195,17 +195,26 @@ class RLVRTrainer:
         if self.profile is None:
             return [], []
         k = int(self.profile["config"]["k"])
+        frontier_k = int(self.profile["config"].get("frontier_k", k))
         rows = self.profile["rows"]
+        incomplete = [row["task_id"] for row in rows
+                      if int(row.get("initial_successes", 0)) < k
+                      and int(row.get("k", k)) < frontier_k]
+        if self.cfg.require_profile and incomplete:
+            raise RuntimeError(
+                f"profil pass@{frontier_k} incomplet pour {len(incomplete)} tâches. "
+                "Relance `rl-profile-v45 --refine-from profile.json --output profile.json`."
+            )
         frontier = []
         schema_has_success = defaultdict(bool)
         schema_rows = defaultdict(list)
         for row in rows:
             schema_rows[(row["capability"], row["schema_id"])].append(row)
-            schema_has_success[(row["capability"], row["schema_id"])] |= \
-                int(row["initial_successes"]) > 0
-            successes = int(row["initial_successes"])
-            if 0 < successes < k:
-                probability = successes / k
+            successes = int(row.get("successes", row["initial_successes"]))
+            measured_k = int(row.get("k", k))
+            schema_has_success[(row["capability"], row["schema_id"])] |= successes > 0
+            if 0 < successes < measured_k:
+                probability = successes / measured_k
                 frontier.append({
                     "capability": row["capability"], "schema_id": row["schema_id"],
                     "difficulty": float(row["difficulty"]),
@@ -345,8 +354,7 @@ class RLVRTrainer:
                 centered = np.asarray(rewards, dtype=np.float32) - float(np.mean(rewards))
                 groups.append((task, prompt_ids, samples, centered.tolist()))
                 stats["useful"] += 1
-            if stats["attempts"] % 10 == 0:
-                self._adjust_curriculum()
+        self._adjust_curriculum()
         if needs_sft:
             with (self.stage_dir / "needs_sft.jsonl").open("a", encoding="utf-8") as stream:
                 for row in needs_sft:
@@ -522,12 +530,14 @@ class RLVRTrainer:
         while self.update < self.cfg.accepted_updates and not self.stop_requested:
             started = time.time()
             groups, rollout = self._rollouts()
-            if not groups:
+            if len(groups) < self.cfg.prompts_per_update:
                 empty_batches += 1
-                print(f"[!] Aucun groupe dynamique sur {int(rollout['attempts'])} tirages; nouvel essai.")
+                print(f"[!] Lot incomplet : {len(groups)}/{self.cfg.prompts_per_update} "
+                      f"groupes dynamiques sur {int(rollout['attempts'])} tirages; nouvel essai.")
                 if empty_batches >= self.cfg.max_empty_batches:
                     raise RuntimeError(
-                        "aucun signal RLVR après 20 lots : les tâches doivent passer par le bridge SFT"
+                        "impossible de remplir un lot RLVR fixe après 20 essais : "
+                        "raffiner le profil ou renforcer le bridge SFT"
                     )
                 continue
             empty_batches = 0

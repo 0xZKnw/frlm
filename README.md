@@ -328,10 +328,12 @@ DrGRPO advantages centered without standard-deviation scaling, a fixed token bud
 denominator, one on-policy epoch, typed verifiers and 5% supervised replay. Zero-success
 tasks are written to `needs_sft.jsonl` instead of receiving a misleading shaped reward.
 
-The measured pre-RL profile of the final v4.5 SFT contains **3/60 pass@1**, **11/60
-pass@6** and **10/60 dynamic groups**. The usable frontier is concentrated in
+The preliminary pre-RL profile of the final v4.5 SFT contains **3/60 pass@1**, **11/60
+pass@6** and **10/60 groups already known to be dynamic**. The initial usable frontier is concentrated in
 `grounded_rooms`, `code_1`, `constraint_number_only` and one `state_update` task;
-`reasoning_program` and `uncertainty` are 0/6 throughout. The trainer therefore reads
+`reasoning_program` and `uncertainty` are 0/6 throughout. Profiles created before the
+full-frontier correction must be refined because a 0/6 task can still succeed between
+samples 7 and 32. The trainer therefore reads
 and hashes `profile.json`, spends 80% of on-policy prompts on measured frontier rows,
 and reserves 20% for zero-success or unmeasured schemas. Those schemas additionally
 receive canonical supervised bridge replay. A resume is refused if the profile changed.
@@ -343,11 +345,17 @@ python run.py rl-profile-v45 --run fr-v4-v45-sft --data-dir data-v4 \
   --init-stage sft --init-ckpt best --tasks 60 --k 6 --frontier-k 32 \
   --max-new 112 --output profile.json
 
+# Migration only: complete an older partial profile without replaying its first samples.
+python run.py rl-profile-v45 --run fr-v4-v45-sft --data-dir data-v4 \
+  --init-stage sft --init-ckpt best --tasks 60 --k 6 --frontier-k 32 \
+  --max-new 112 --refine-from profile.json --output profile.json
+
 # 2. Main local RTX 4060 run. Start with a short 10-update pilot, then resume.
 python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 \
   --init-stage sft --init-ckpt best --ref-stage sft --ref-ckpt best \
   --updates 10 --prompts 3 --group 6 --max-new 112 --micro-bs 2 \
-  --lr 2e-6 --kl-beta 0.018 --kl-target 0.012 --replay-weight 0.05
+  --lr 2e-6 --kl-beta 0.018 --kl-target 0.012 --replay-weight 0.05 \
+  --eval-tasks 60
 python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 \
   --updates 200 --resume latest
 ```
@@ -360,17 +368,20 @@ fp32, forward passes use bf16 autocast, reference gradients are disabled, optimi
 foreach is disabled, and only one CPU microbatch is moved to CUDA at a time.
 
 RLAIF is offline: candidate generation never waits for an external judge while the GPU
-is allocated. The judge packet contains only prompts and randomized anonymous outputs;
-it excludes canonical answers, Python rewards and private provenance. Imported rankings
-must cover exactly the issued candidate IDs, use integer scores 0..4, clear a margin,
-and pass truncation/repetition/safety filters before pairs are sealed for DPO.
+is allocated. Two blind packets contain only prompts and anonymous outputs, with the
+candidate order exactly reversed in packet B; they exclude canonical answers, Python
+rewards and private provenance. The two passes must be judged independently and agree
+on the winner. Imported rankings must cover exactly the issued candidate IDs, use integer
+scores 0..4, clear the margin in both passes, and pass truncation/repetition/safety filters
+before pairs are sealed for DPO. DPO validation is split by `prompt_id`, never by pair.
 
 ```bash
 python run.py rlaif-build-v45 --run fr-v4-v45-sft --data-dir data-v4 \
   --init-stage rlvr-v45 --init-ckpt best --prompts 40 --candidates 6
-# Fill runs/fr-v4-v45-sft/rlaif-v45/scores.jsonl using JUDGE_INSTRUCTIONS.md.
+# Fill scores_a.jsonl and scores_b.jsonl independently using JUDGE_INSTRUCTIONS.md.
 python run.py rlaif-import-v45 --run fr-v4-v45-sft \
-  --scores runs/fr-v4-v45-sft/rlaif-v45/scores.jsonl
+  --scores runs/fr-v4-v45-sft/rlaif-v45/scores_a.jsonl \
+  --scores-reverse runs/fr-v4-v45-sft/rlaif-v45/scores_b.jsonl
 python run.py dpo-v45 --run fr-v4-v45-sft --data-dir data-v4 \
   --init-stage rlvr-v45 --init-ckpt best --ref-stage rlvr-v45 --ref-ckpt best \
   --epochs 1 --grad-accum 8 --lr 5e-7 --beta 0.10

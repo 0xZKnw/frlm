@@ -4,10 +4,13 @@ import json
 import random
 import tempfile
 import unittest
+from collections import deque
 from pathlib import Path
 
+from frlm.dpo_v45 import _load_pairs
 from frlm.rlaif_offline_v45 import _read_prompts, import_scores
 from frlm.posttrain_gates_v45 import evaluate_gates
+from frlm.rl_profile_v45 import _summary
 from frlm.rl_v45 import RLVRConfig, RLVRTrainer, _canonical_answer
 from frlm.rl_tasks_v45 import SCHEMAS_BY_CAPABILITY, make_task
 from frlm.verifiers_v45 import AnswerSpec, final_text, verify
@@ -51,6 +54,18 @@ class VerifierTests(unittest.TestCase):
 
 
 class TaskTests(unittest.TestCase):
+    def test_resume_pass32_revele_une_frontiere_cachee(self):
+        rows = [
+            {"capability": "code", "schema_id": "code_0", "first_success": False,
+             "initial_successes": 0, "successes": 1, "k": 32, "entropy": 1.0},
+            {"capability": "grounded", "schema_id": "grounded_year", "first_success": True,
+             "initial_successes": 6, "successes": 6, "k": 6, "entropy": 0.1},
+        ]
+        overall = _summary(rows, 6, 32)["overall"]
+        self.assertEqual(overall["pass@6"], 0.5)
+        self.assertEqual(overall["pass@32"], 1.0)
+        self.assertEqual(overall["frontier_dynamic_rate"], 0.5)
+
     def test_deterministic_and_split_surfaces(self):
         a = make_task(123, "train", 0.4)
         b = make_task(123, "train", 0.4)
@@ -92,20 +107,22 @@ class TaskTests(unittest.TestCase):
     def test_curriculum_rl_est_pilote_par_le_profil(self):
         trainer = RLVRTrainer.__new__(RLVRTrainer)
         trainer.cfg = RLVRConfig(require_profile=True)
-        trainer.profile = {"config": {"k": 6}, "rows": [
+        trainer.profile = {"config": {"k": 6, "frontier_k": 32}, "rows": [
             {"capability": "code", "schema_id": "code_1", "difficulty": 0.3,
-             "initial_successes": 1},
+             "initial_successes": 1, "successes": 7, "k": 32, "task_id": "a"},
             {"capability": "reasoning_program", "schema_id": "linear_equation",
-             "difficulty": 0.1, "initial_successes": 0},
+             "difficulty": 0.1, "initial_successes": 0, "successes": 1,
+             "k": 32, "task_id": "b"},
             {"capability": "grounded", "schema_id": "grounded_year", "difficulty": 0.2,
-             "initial_successes": 6},
+             "initial_successes": 6, "successes": 6, "k": 6, "task_id": "c"},
         ]}
         frontier, bridge = trainer._profile_curriculum()
-        self.assertEqual({row["schema_id"] for row in frontier}, {"code_1"})
+        self.assertEqual({row["schema_id"] for row in frontier},
+                         {"code_1", "linear_equation"})
         bridge_schemas = {row["schema_id"] for row in bridge}
-        self.assertIn("linear_equation", bridge_schemas)
         self.assertIn("small_power", bridge_schemas)
         self.assertNotIn("code_1", bridge_schemas)
+        self.assertNotIn("linear_equation", bridge_schemas)
         self.assertNotIn("grounded_year", bridge_schemas)
 
         trainer.frontier_specs, trainer.bridge_specs = frontier, bridge
@@ -113,8 +130,28 @@ class TaskTests(unittest.TestCase):
         trainer.difficulty = {capability: 0.25 for capability in SCHEMAS_BY_CAPABILITY}
         trainer.rollout_index = 0
         sampled = [trainer._next_task().schema_id for _ in range(100)]
-        self.assertGreaterEqual(sampled.count("code_1"), 65)
-        self.assertGreaterEqual(len(sampled) - sampled.count("code_1"), 10)
+        self.assertGreaterEqual(sum(schema in {"code_1", "linear_equation"}
+                                    for schema in sampled), 65)
+
+    def test_curriculum_refuse_un_zero_sur_six_non_raffine(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.cfg = RLVRConfig(require_profile=True)
+        trainer.profile = {"config": {"k": 6, "frontier_k": 32}, "rows": [{
+            "task_id": "zero", "capability": "code", "schema_id": "code_0",
+            "difficulty": 0.2, "initial_successes": 0, "successes": 0, "k": 6,
+        }]}
+        with self.assertRaises(RuntimeError):
+            trainer._profile_curriculum()
+
+    def test_curriculum_difficulte_s_active_des_20_observations(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.difficulty = {capability: 0.25 for capability in SCHEMAS_BY_CAPABILITY}
+        trainer.cap_history = {capability: deque(maxlen=40)
+                               for capability in SCHEMAS_BY_CAPABILITY}
+        trainer.cap_history["code"].extend([0.0] * 20)
+        trainer._adjust_curriculum()
+        self.assertEqual(trainer.difficulty["code"], 0.20)
+        self.assertFalse(trainer.cap_history["code"])
 
 
 class OfflineRLAIFTests(unittest.TestCase):
@@ -152,26 +189,61 @@ class OfflineRLAIFTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             stage = self._fixture(root)
-            scores = stage / "scores.jsonl"
-            scores.write_text(json.dumps({
+            scores_a = stage / "scores_a.jsonl"
+            scores_b = stage / "scores_b.jsonl"
+            judgment = {
                 "prompt_id": "p_1", "ranking": ["c_good", "c_bad"],
                 "scores": {"c_good": 4, "c_bad": 1}, "unsafe": [],
-            }) + "\n", encoding="utf-8")
-            report = import_scores("run", str(root), scores)
+            }
+            scores_a.write_text(json.dumps(judgment) + "\n", encoding="utf-8")
+            scores_b.write_text(json.dumps(judgment) + "\n", encoding="utf-8")
+            report = import_scores("run", str(root), scores_a, scores_b)
             self.assertEqual(report["pairs"], 1)
+            self.assertTrue(report["double_judgment"])
             self.assertTrue((stage / "pairs.sealed.jsonl").is_file())
 
     def test_import_refuse_un_identifiant_invente(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             stage = self._fixture(root)
-            scores = stage / "scores.jsonl"
-            scores.write_text(json.dumps({
+            scores_a = stage / "scores_a.jsonl"
+            scores_b = stage / "scores_b.jsonl"
+            scores_a.write_text(json.dumps({
+                "prompt_id": "p_1", "ranking": ["c_good", "c_bad"],
+                "scores": {"c_good": 4, "c_bad": 1}, "unsafe": [],
+            }) + "\n", encoding="utf-8")
+            scores_b.write_text(json.dumps({
                 "prompt_id": "p_1", "ranking": ["c_good", "c_forge"],
                 "scores": {"c_good": 4, "c_forge": 0}, "unsafe": [],
             }) + "\n", encoding="utf-8")
             with self.assertRaises(ValueError):
-                import_scores("run", str(root), scores)
+                import_scores("run", str(root), scores_a, scores_b)
+
+    def test_import_refuse_un_desaccord_sur_le_meilleur(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = self._fixture(root)
+            a, b = stage / "a.jsonl", stage / "b.jsonl"
+            a.write_text(json.dumps({"prompt_id": "p_1", "ranking": ["c_good", "c_bad"],
+                                     "scores": {"c_good": 4, "c_bad": 1}, "unsafe": []}) + "\n")
+            b.write_text(json.dumps({"prompt_id": "p_1", "ranking": ["c_bad", "c_good"],
+                                     "scores": {"c_bad": 4, "c_good": 1}, "unsafe": []}) + "\n")
+            with self.assertRaises(ValueError):
+                import_scores("run", str(root), a, b)
+
+    def test_split_dpo_est_isole_par_prompt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pairs.jsonl"
+            rows = []
+            for prompt in range(6):
+                for pair in range(2):
+                    rows.append({"pair_id": f"pair_{prompt}_{pair}",
+                                 "prompt_id": f"prompt_{prompt}", "prompt": f"Question {prompt}",
+                                 "chosen": f"bonne {pair}", "rejected": f"mauvaise {pair}"})
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            train, val = _load_pairs(path, 45)
+            self.assertFalse({row["prompt_id"] for row in train}
+                             & {row["prompt_id"] for row in val})
 
 
 class GateTests(unittest.TestCase):

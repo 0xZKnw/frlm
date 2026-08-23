@@ -157,23 +157,32 @@ pré-entraînement neuf. Le pipeline corrigé ne remplace pas les anciens `rl.py
 
 ```powershell
 python run.py rl-profile-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage sft --init-ckpt best --tasks 60 --k 6 --frontier-k 32 --max-new 112 --output profile.json
-python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage sft --init-ckpt best --ref-stage sft --ref-ckpt best --updates 10 --prompts 3 --group 6 --max-new 112 --micro-bs 2 --lr 2e-6 --kl-beta 0.018 --kl-target 0.012 --replay-weight 0.05
+python run.py rl-profile-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage sft --init-ckpt best --tasks 60 --k 6 --frontier-k 32 --max-new 112 --refine-from profile.json --output profile.json
+python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage sft --init-ckpt best --ref-stage sft --ref-ckpt best --updates 10 --prompts 3 --group 6 --max-new 112 --micro-bs 2 --lr 2e-6 --kl-beta 0.018 --kl-target 0.012 --replay-weight 0.05 --eval-tasks 60
 python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 --updates 200 --resume latest
 python run.py rlaif-build-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage rlvr-v45 --init-ckpt best --prompts 40 --candidates 6
-python run.py rlaif-import-v45 --run fr-v4-v45-sft --scores runs/fr-v4-v45-sft/rlaif-v45/scores.jsonl
+python run.py rlaif-import-v45 --run fr-v4-v45-sft --scores runs/fr-v4-v45-sft/rlaif-v45/scores_a.jsonl --scores-reverse runs/fr-v4-v45-sft/rlaif-v45/scores_b.jsonl
 python run.py dpo-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage rlvr-v45 --init-ckpt best --ref-stage rlvr-v45 --ref-ckpt best --epochs 1 --grad-accum 8 --lr 5e-7 --beta 0.10
 ```
 
-Le profil pass@6/pass@32 est obligatoire avant RLVR. Le trainer retient un groupe
+Le profil pass@6/pass@32 est obligatoire avant RLVR. Toute tâche non maîtrisée, y
+compris à 0/6, doit être mesurée jusqu'à 32 ; `--refine-from` complète les anciens
+profils sans refaire leurs premiers rollouts. Le trainer retient un groupe
 uniquement si son nombre de réussites primaires est strictement entre 0 et G ; il
 centre les avantages sans division par l'écart-type, impose T=1/top-p=1 et un seul
-epoch on-policy. Les groupes sans aucune réussite vont dans `needs_sft.jsonl`. Le
+epoch on-policy. Une update acceptée contient exactement trois groupes dynamiques et
+la sélection du checkpoint utilise les 60 tâches dev. Les groupes sans aucune réussite vont dans `needs_sft.jsonl`. Le
 replay de 5 % utilise des exemples supervisés vérifiés et conversationnels propres.
 Le scheduler lit et hache `profile.json` : 80 % des prompts ciblent les lignes
 dynamiques mesurées et 20 % explorent les schémas à zéro succès ou absents du petit
 profil. Ces derniers reçoivent aussi un bridge supervisé canonique dans le replay. Refuser une reprise si le hash du
 profil diffère, et ne pas remplacer ce curriculum par un tirage uniforme sans nouvelle
 mesure pass@k.
+
+Le RLAIF v4.5 produit deux paquets aveugles A/B dont l'ordre des candidats est inversé.
+Les jugements doivent être réalisés indépendamment, couvrir tous les IDs et désigner le
+même gagnant ; la marge minimale doit tenir dans les deux passes. Le split DPO est fait
+par `prompt_id` afin qu'aucune paire d'un même prompt ne traverse train/validation.
 
 Sur model_v3, une ancre KL bf16 a produit une KL initiale artificielle d'environ
 0,96 contre 0,00084 en fp32 lors du smoke test RTX 4060. Conserver donc la référence

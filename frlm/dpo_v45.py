@@ -51,7 +51,7 @@ def _load_pairs(path: Path, seed: int) -> tuple[list[dict], list[dict]]:
             if not line.strip():
                 continue
             row = json.loads(line)
-            required = ("pair_id", "prompt", "chosen", "rejected")
+            required = ("pair_id", "prompt_id", "prompt", "chosen", "rejected")
             if any(not str(row.get(key) or "").strip() for key in required):
                 raise ValueError(f"paire DPO incomplète : {row.get('pair_id')}")
             if row["pair_id"] in seen or row["chosen"] == row["rejected"]:
@@ -60,10 +60,23 @@ def _load_pairs(path: Path, seed: int) -> tuple[list[dict], list[dict]]:
             rows.append(row)
     if len(rows) < 10:
         raise ValueError("au moins 10 paires distinctes sont requises pour le DPO")
+    by_prompt: dict[str, list[dict]] = {}
+    for row in rows:
+        by_prompt.setdefault(row["prompt_id"], []).append(row)
+    if len(by_prompt) < 5:
+        raise ValueError("au moins 5 prompts distincts sont requis pour isoler la validation DPO")
     rng = random.Random(seed)
-    rng.shuffle(rows)
-    val_count = max(2, min(len(rows) // 5, 32))
-    return rows[val_count:], rows[:val_count]
+    prompt_ids = list(by_prompt)
+    rng.shuffle(prompt_ids)
+    val_prompt_count = max(1, min(len(prompt_ids) // 5, 8))
+    val_ids = set(prompt_ids[:val_prompt_count])
+    train = [row for row in rows if row["prompt_id"] not in val_ids]
+    val = [row for row in rows if row["prompt_id"] in val_ids]
+    rng.shuffle(train)
+    rng.shuffle(val)
+    if {row["prompt_id"] for row in train} & {row["prompt_id"] for row in val}:
+        raise AssertionError("fuite de prompt entre train et validation DPO")
+    return train, val
 
 
 class DPOTrainer:
@@ -118,7 +131,9 @@ class DPOTrainer:
             self._resume(resume)
         (self.stage_dir / "config.json").write_text(
             json.dumps({"dpo_v45": asdict(cfg), "model": self.mcfg.to_dict(),
-                        "pairs_train": len(self.train_pairs), "pairs_val": len(self.val_pairs)},
+                        "pairs_train": len(self.train_pairs), "pairs_val": len(self.val_pairs),
+                        "prompts_train": len({row["prompt_id"] for row in self.train_pairs}),
+                        "prompts_val": len({row["prompt_id"] for row in self.val_pairs})},
                        ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
