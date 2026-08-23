@@ -226,10 +226,10 @@ modal run --detach modal_app.py --gpu cpu --spawn --cmd \
 
 # Validate Volume metadata, masks and the exact MID checkpoint without a GPU.
 modal run modal_app.py --check-only --gpu h100 --cmd \
-  "python run.py sft --data-dir data-v4 --run fr-v4-v45-sft --preset v4-base --sft-recipe v4.5 --seq-len 512 --batch-size 128 --grad-accum 12 --max-steps 720 --optimizer adamw --lr 2e-5 --weight-decay 0.01 --schedule cosine --warmup 30 --min-lr-frac 0.10 --replay-frac 0.12 --replay-mix mid_v43_stage1_train.bin=0.80,mid_v43_stage2_train.bin=0.20 --replay-val mid_v43_val.bin --eval-every 100 --eval-iters 48 --sample-every 100 --save-every 100 --keep-last 12 --resume /vol/runs/fr-v4-v43/mid/ckpt_latest.pt"
+  "python run.py sft --data-dir data-v4 --run fr-v4-v45-sft --preset v4-base --sft-recipe v4.5 --seq-len 512 --batch-size 128 --grad-accum 12 --max-steps 736 --optimizer adamw --lr 2e-5 --weight-decay 0.01 --schedule cosine --warmup 30 --min-lr-frac 0.10 --replay-frac 0.12 --replay-mix mid_v43_stage1_train.bin=0.80,mid_v43_stage2_train.bin=0.20 --replay-val mid_v43_val.bin --eval-every 100 --eval-iters 48 --sample-every 100 --save-every 100 --keep-last 12 --resume /vol/runs/fr-v4-v43/mid/ckpt_latest.pt"
 ```
 
-With about 38.4k supervised assistant tokens per update, 720 steps expose roughly
+With 37.5k supervised assistant tokens per update, 736 steps expose roughly
 27.6M assistant tokens, or 1.15 passes over the 24M-token corpus. Re-run
 `python -m frlm.audit_sft_v45` after every corpus rebuild and adjust this value if
 the measured density changes.

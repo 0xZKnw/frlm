@@ -135,15 +135,15 @@ v4.3 final au step 11444 :
 
 ```powershell
 python run.py prepare-sft-v45 --data-dir data-v4 --target-supervised 24e6 --seq-len 512 --seed 451337
-python run.py sft --data-dir data-v4 --run fr-v4-v45-sft --preset v4-base --sft-recipe v4.5 --seq-len 512 --batch-size 128 --grad-accum 12 --max-steps 720 --optimizer adamw --lr 2e-5 --weight-decay 0.01 --schedule cosine --warmup 30 --min-lr-frac 0.10 --replay-frac 0.12 --replay-mix "mid_v43_stage1_train.bin=0.80,mid_v43_stage2_train.bin=0.20" --replay-val mid_v43_val.bin --eval-every 100 --eval-iters 48 --sample-every 100 --save-every 100 --keep-last 12 --resume runs/fr-v4-v43/mid/ckpt_latest.pt
+python run.py sft --data-dir data-v4 --run fr-v4-v45-sft --preset v4-base --sft-recipe v4.5 --seq-len 512 --batch-size 128 --grad-accum 12 --max-steps 736 --optimizer adamw --lr 2e-5 --weight-decay 0.01 --schedule cosine --warmup 30 --min-lr-frac 0.10 --replay-frac 0.12 --replay-mix "mid_v43_stage1_train.bin=0.80,mid_v43_stage2_train.bin=0.20" --replay-val mid_v43_val.bin --eval-every 100 --eval-iters 48 --sample-every 100 --save-every 100 --keep-last 12 --resume runs/fr-v4-v43/mid/ckpt_latest.pt
 ```
 
 Les bins v4.5 contiennent une conversation entière par document (maximum 512 tokens)
 et doivent être chargés avec `ConversationCorpus`. La loss SFT est une somme divisée
 par le nombre global de tokens assistant de l'update ; le replay conserve un poids
 séparé de 12 %. Le mix cible 24M tokens assistant en 30/18/18/12/8/6/5/3 et plafonne
-OpenHermes-FR à 12 %. Les 720 steps correspondent à environ 1,15 passe pour 24M
-tokens assistant et 38,4k tokens supervisés par update. Réexécuter l'audit après
+OpenHermes-FR à 12 %. Les 736 steps correspondent à environ 1,15 passe pour 24M
+tokens assistant et 37,5k tokens supervisés par update. Réexécuter l'audit après
 chaque rebuild et ajuster ce nombre si la densité change, sans relancer le mid.
 
 Benchmarks :

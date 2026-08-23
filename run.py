@@ -595,6 +595,14 @@ class Trainer:
         n_ne = self.raw_model.num_params(non_embedding=True)
         fpt = self.raw_model.flops_per_token()
         tps_step = cfg.tokens_per_step()
+        if cfg.optimizer == "muon":
+            optim_detail = (
+                f"{human(self.opt_info['muon_params'])} via Muon, "
+                f"{human(self.opt_info['adam_params'])} via AdamW"
+            )
+        else:
+            total_optim = self.opt_info["muon_params"] + self.opt_info["adam_params"]
+            optim_detail = f"{human(total_optim)} via AdamW"
 
         console.print(Panel.fit(
             f"[bold]{cfg.run_name}[/] · phase [cyan]{cfg.stage}[/] · preset [cyan]{cfg.preset}[/]\n"
@@ -604,8 +612,7 @@ class Trainer:
             f"gate+QK-Norm zc · RoPE {self.mcfg.rope_dims}/{self.mcfg.head_dim} · "
             f"ffn={self.mcfg.d_ff} · ctx={cfg.seq_len}\n"
             f"batch  : {cfg.batch_size} × {cfg.grad_accum} accum × {cfg.seq_len} = [bold]{human(tps_step)}[/] tokens/step\n"
-            f"optim  : {cfg.optimizer} ({human(self.opt_info['muon_params'])} via Muon, "
-            f"{human(self.opt_info['adam_params'])} via AdamW) · schedule {cfg.schedule}\n"
+            f"optim  : {cfg.optimizer} ({optim_detail}) · schedule {cfg.schedule}\n"
             f"corpus : {human(len(self.train_data))} tokens train / {human(len(self.val_data))} val\n"
             f"cible  : {cfg.max_steps} steps = {human(cfg.max_steps*tps_step)} tokens "
             f"({cfg.max_steps*tps_step/max(1,n_ne):.1f} tokens/param hors emb.)",
@@ -1405,7 +1412,7 @@ def main():
         print("\n=== SFT v4.5 prêt ===")
         print(json.dumps(rep, indent=2, ensure_ascii=False))
         print("\nÉtape suivante : python run.py sft --sft-recipe v4.5 "
-              "--seq-len 512 --batch-size 64 --grad-accum 12 --max-steps 1000 "
+              "--seq-len 512 --batch-size 128 --grad-accum 12 --max-steps 736 "
               "--optimizer adamw --lr 2e-5 --replay-frac 0.12 "
               "--resume runs/fr-v4-v43/mid/ckpt_latest.pt")
 
