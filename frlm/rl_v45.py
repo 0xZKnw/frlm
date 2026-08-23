@@ -423,6 +423,7 @@ class RLVRTrainer:
         if self.baseline_score is None:
             baseline = self._evaluate()
             self.baseline_score = baseline["macro"]
+            self.best_score = max(self.best_score, self.baseline_score)
             (self.stage_dir / "eval_baseline.json").write_text(
                 json.dumps(baseline, ensure_ascii=False, indent=2), encoding="utf-8"
             )

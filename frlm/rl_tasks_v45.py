@@ -67,87 +67,83 @@ def _surface(rng: random.Random, split: Split, train: tuple[str, ...], dev: tupl
 
 
 def _reasoning(rng: random.Random, seed: int, split: Split, difficulty: float) -> TaskSpec:
-    schemas = ("stock_three_ops", "inclusive_count", "remainder", "weekly_cycle", "compare_totals")
+    # Ne jamais ajouter ici intervalle/fencepost, reste euclidien, cycle de jours,
+    # comparaison de branches, transitivité ou composition multi-opérations : ce
+    # sont les familles scellées du benchmark OOD v2.
+    schemas = ("linear_equation", "mean_three", "exact_percentage", "small_power", "signed_product")
     schema = rng.choice(schemas)
     scale = 20 + int(180 * difficulty)
     trace: list[str]
-    if schema == "stock_three_ops":
-        start, packs, size = rng.randint(3, scale), rng.randint(2, 8), rng.randint(2, 12)
-        used = rng.randint(1, min(start + packs * size - 1, scale))
-        result = start + packs * size - used
-        name, obj = rng.choice(NAMES), rng.choice(OBJECTS)
+    if schema == "linear_equation":
+        result, offset = rng.randint(-scale, scale), rng.randint(2, scale)
+        total = result + offset
         template, sid = _surface(rng, split, (
-            "{n} possède {a} {o}, reçoit {b} paquets de {c}, puis en utilise {d}. Combien lui en reste-t-il ?",
-            "Stock initial {a}; ajoute {b} lots de {c}, puis retire {d}. Donne le stock final.",
-            "Calcule {a} + ({b} × {c}) - {d}.",
+            "Trouve l'entier x tel que x + {a} = {b}.",
+            "Dans l'égalité ? + {a} = {b}, quelle valeur remplace le point d'interrogation ?",
         ), (
-            "Une réserve contient {a} {o}. {b} caisses de {c} arrivent et {d} unités partent. Quel solde reste ?",
-            "Après une hausse de {b} groupes de {c} et une baisse de {d}, quel devient le niveau {a} ?",
+            "Résous cette équation à une inconnue : {b} = {a} + x.",
         ))
-        prompt = template.format(n=name, o=obj, a=start, b=packs, c=size, d=used)
-        trace = [f"{packs} × {size} = {packs * size}",
-                 f"{start} + {packs * size} - {used} = {result}"]
+        prompt = template.format(a=offset, b=total)
+        trace = [f"x = {total} - {offset}", f"x = {result}"]
         answer = AnswerSpec("integer", result)
-        program = {"op": "sub", "args": [{"op": "add", "args": [start, {"op": "mul", "args": [packs, size]}]}, used]}
-    elif schema == "inclusive_count":
-        first = rng.randint(0, scale)
-        last = first + rng.randint(2, max(3, scale // 2))
-        result = last - first + 1
+        program = {"op": "solve_add", "offset": offset, "total": total}
+    elif schema == "mean_three":
+        result = rng.randint(2, scale)
+        delta = rng.randint(1, min(result, max(2, scale // 3)))
+        values = (result - delta, result, result + delta)
         template, sid = _surface(rng, split, (
-            "Combien d'entiers y a-t-il de {a} à {b}, bornes incluses ?",
-            "Les dossiers sont numérotés de {a} à {b}. Combien de numéros différents ?",
+            "Quelle est la moyenne arithmétique de {a}, {b} et {c} ?",
+            "Trois mesures valent {a}, {b} et {c}. Donne leur moyenne.",
         ), (
-            "Une série commence au rang {a} et finit au rang {b}; les extrémités comptent. Quelle est sa longueur ?",
+            "Calcule la valeur moyenne du triplet ({a}; {b}; {c}).",
         ))
-        prompt = template.format(a=first, b=last)
-        trace = [f"{last} - {first} + 1 = {result}"]
+        prompt = template.format(a=values[0], b=values[1], c=values[2])
+        trace = [f"Somme = {sum(values)}", f"{sum(values)} / 3 = {result}"]
         answer = AnswerSpec("integer", result)
-        program = {"op": "inclusive_count", "first": first, "last": last}
-    elif schema == "remainder":
-        divisor = rng.randint(3, 12)
-        quotient = rng.randint(2, max(3, scale // divisor))
-        remainder = rng.randint(1, divisor - 1)
-        total = divisor * quotient + remainder
+        program = {"op": "mean", "args": list(values)}
+    elif schema == "exact_percentage":
+        rate = rng.choice((10, 20, 25, 50))
+        unit = 100 // rate
+        base = unit * rng.randint(2, max(3, scale // unit))
+        result = base * rate // 100
         template, sid = _surface(rng, split, (
-            "On range {n} objets par groupes de {d}. Combien restent hors des groupes complets ?",
-            "Quel est le reste de la division de {n} par {d} ?",
+            "Combien représentent {r} % de {n} ?",
+            "Calcule exactement {r} pour cent de {n}.",
         ), (
-            "Des cartons prennent {d} unités. Après avoir rempli les cartons avec {n} unités, quel est le reliquat ?",
+            "Une quantité vaut {n}; quelle part numérique correspond à {r} % ?",
         ))
-        prompt = template.format(n=total, d=divisor)
-        trace = [f"{total} = {quotient} × {divisor} + {remainder}"]
-        answer = AnswerSpec("integer", remainder)
-        program = {"op": "mod", "args": [total, divisor]}
-    elif schema == "weekly_cycle":
-        days = ("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
-        start, offset = rng.randrange(7), rng.randint(2, 10 + int(70 * difficulty))
-        result = days[(start + offset) % 7]
+        prompt = template.format(r=rate, n=base)
+        trace = [f"{base} × {rate} / 100 = {result}"]
+        answer = AnswerSpec("integer", result)
+        program = {"op": "percentage", "base": base, "rate": rate}
+    elif schema == "small_power":
+        value = rng.randint(2, min(20, 5 + int(15 * difficulty)))
+        exponent = rng.choice((2, 3))
+        result = value ** exponent
         template, sid = _surface(rng, split, (
-            "Nous sommes {day}. Quel jour serons-nous dans {n} jours ?",
-            "Avance de {n} jours à partir de {day}.",
+            "Combien vaut {n} puissance {p} ?",
+            "Calcule {n}^{p}.",
         ), (
-            "Le calendrier indique {day}. Après {n} journées complètes, quel jour affichera-t-il ?",
+            "Évalue la puissance entière de base {n} et d'exposant {p}.",
         ))
-        prompt = template.format(day=days[start], n=offset)
-        trace = [f"{offset} modulo 7 = {offset % 7}", f"Jour final : {result}"]
-        answer = AnswerSpec("choice", result, choices=days)
-        program = {"op": "cycle", "size": 7, "start": start, "offset": offset}
+        prompt = template.format(n=value, p=exponent)
+        trace = [f"{value}^{exponent} = {result}"]
+        answer = AnswerSpec("integer", result)
+        program = {"op": "pow", "base": value, "exponent": exponent}
     else:
-        left_a, left_b = rng.randint(2, scale), rng.randint(2, scale)
-        right_a, right_b = rng.randint(2, scale), rng.randint(2, scale)
-        while left_a + left_b == right_a + right_b:
-            right_b += 1
-        result = "option A" if left_a + left_b > right_a + right_b else "option B"
+        left = rng.randint(-max(3, scale // 3), max(3, scale // 3))
+        right = rng.randint(2, max(3, scale // 4))
+        result = left * right
         template, sid = _surface(rng, split, (
-            "Option A vaut {a}+{b}; option B vaut {c}+{d}. Laquelle donne le plus grand total ?",
-            "Compare les sommes A={a}+{b} et B={c}+{d}. Quel choix gagne ?",
+            "Calcule le produit signé {a} × {b}.",
+            "Quel entier obtient-on en multipliant {a} par {b} ?",
         ), (
-            "Deux équipes marquent A: {a} puis {b}, B: {c} puis {d}. Qui obtient le total maximal ?",
+            "Effectue cette multiplication avec son signe : ({a}) · ({b}).",
         ))
-        prompt = template.format(a=left_a, b=left_b, c=right_a, d=right_b)
-        trace = [f"A = {left_a + left_b}", f"B = {right_a + right_b}", result]
-        answer = AnswerSpec("choice", result, aliases=(result[-1],), choices=("option A", "option B", "A", "B"))
-        program = {"op": "argmax", "a": [left_a, left_b], "b": [right_a, right_b]}
+        prompt = template.format(a=left, b=right)
+        trace = [f"{left} × {right} = {result}"]
+        answer = AnswerSpec("integer", result)
+        program = {"op": "mul", "args": [left, right]}
     prompt += " Réponds par la réponse finale, sans recopier l'énoncé."
     return TaskSpec(_task_id(seed, schema, sid, prompt), schema, sid, split,
                     "reasoning_program", difficulty, prompt, answer, program,
@@ -196,28 +192,33 @@ def _constraints(rng: random.Random, seed: int, split: Split, difficulty: float)
 
 
 def _uncertainty(rng: random.Random, seed: int, split: Split, difficulty: float) -> TaskSpec:
-    name, obj = rng.choice(NAMES), rng.choice(OBJECTS)
-    known = rng.randint(4, 80)
-    prompt = (f"Le texte indique que {name} possède {known} {obj}. "
-              "Combien de portes possède sa maison ?")
+    code_a = rng.choice(("AX-12", "BR-7", "CT-44", "DX-9"))
+    code_b = rng.choice(tuple(code for code in ("AX-12", "BR-7", "CT-44", "DX-9")
+                              if code != code_a))
+    prompt = (f"Deux avis officiels publiés au même instant se contredisent : le premier donne "
+              f"le code {code_a}, le second le code {code_b}. Aucun avis n'est prioritaire. "
+              "Quel code unique doit-on retenir ?")
     sid = f"{split}:{rng.randrange(3 if split == 'train' else 2)}"
-    return TaskSpec(_task_id(seed, "missing_information", sid, prompt), "missing_information",
+    return TaskSpec(_task_id(seed, "contradictory_sources", sid, prompt), "contradictory_sources",
                     sid, split, "uncertainty", difficulty, prompt, AnswerSpec("abstain"),
-                    {"op": "unanswerable", "missing": "door_count"},
-                    ("Le nombre de portes n'est pas fourni.",), "typed_v45_1", seed)
+                    {"op": "unanswerable", "reason": "equal_authority_contradiction"},
+                    ("Les deux sources de même autorité se contredisent.",), "typed_v45_1", seed)
 
 
 def _state(rng: random.Random, seed: int, split: Split, difficulty: float) -> TaskSpec:
-    start, gain, loss = rng.randint(3, 60), rng.randint(2, 30), rng.randint(1, 20)
-    result = start + gain - loss
-    prompt = (f"Conversation précédente : utilisateur : le compteur vaut {start}. assistant : compris. "
-              f"utilisateur : ajoute {gain}. assistant : il vaut {start + gain}. "
-              f"utilisateur : retire maintenant {loss}. Quelle est sa nouvelle valeur ?")
+    colors = ("rouge", "bleu", "vert", "jaune")
+    first = rng.choice(colors)
+    second = rng.choice(tuple(color for color in colors if color != first))
+    third = rng.choice(tuple(color for color in colors if color != second))
+    prompt = (f"Conversation précédente : utilisateur : l'étiquette du dossier est {first}. "
+              f"assistant : noté. utilisateur : remplace-la par {second}. assistant : fait. "
+              f"utilisateur : correction finale, mets-la en {third}. Quelle est sa couleur actuelle ?")
     sid = f"{split}:{rng.randrange(3 if split == 'train' else 2)}"
     return TaskSpec(_task_id(seed, "state_update", sid, prompt), "state_update", sid, split,
-                    "state_tracking", difficulty, prompt, AnswerSpec("integer", result),
-                    {"op": "sub", "args": [{"op": "add", "args": [start, gain]}, loss]},
-                    (f"{start} + {gain} = {start + gain}", f"{start + gain} - {loss} = {result}"),
+                    "state_tracking", difficulty, prompt,
+                    AnswerSpec("choice", third, choices=colors),
+                    {"op": "last_write_wins", "values": [first, second, third]},
+                    (f"La dernière mise à jour remplace {second} par {third}.",),
                     "typed_v45_1", seed)
 
 
@@ -306,4 +307,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

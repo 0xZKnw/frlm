@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
+from frlm.rlaif_offline_v45 import _read_prompts, import_scores
+from frlm.posttrain_gates_v45 import evaluate_gates
 from frlm.rl_tasks_v45 import make_task
 from frlm.verifiers_v45 import AnswerSpec, final_text, verify
 
@@ -65,6 +69,85 @@ class TaskTests(unittest.TestCase):
         for index, (capability, response) in enumerate(responses.items()):
             task = make_task(900 + index, capability=capability)
             self.assertTrue(verify(task.answer, response(task)).primary_success, task)
+
+    def test_no_ood_v2_family_is_generated(self):
+        forbidden = {"transitive", "missing_information", "inclusive_count", "remainder",
+                     "weekly_cycle", "compare_totals", "stock_three_ops"}
+        schemas = {make_task(20_000 + index).schema_id for index in range(600)}
+        self.assertTrue(schemas.isdisjoint(forbidden), schemas & forbidden)
+
+
+class OfflineRLAIFTests(unittest.TestCase):
+    def test_pool_exclut_les_familles_ood_historiques(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pool.jsonl"
+            path.write_text(
+                json.dumps({"type": "calc", "q": "Une composition arithmétique secrète."}) + "\n"
+                + json.dumps({"type": "piege", "q": "Une information manque ici."}) + "\n"
+                + json.dumps({"type": "chat", "q": "Rédige un message de bienvenue."}) + "\n",
+                encoding="utf-8",
+            )
+            rows = _read_prompts([path], 10, 1)
+            self.assertEqual([row["category"] for row in rows], ["chat"])
+
+    def _fixture(self, root: Path):
+        stage = root / "run" / "rlaif-v45"
+        stage.mkdir(parents=True)
+        candidates = {
+            "prompt_id": "p_1", "prompt": "Combien font 2 + 2 ?",
+            "category": "calc", "source": "fixture",
+            "candidates": [
+                {"candidate_id": "c_good", "text": "4", "stopped": True,
+                 "tokens": 2, "repeat_ratio": 0.0},
+                {"candidate_id": "c_bad", "text": "5", "stopped": True,
+                 "tokens": 2, "repeat_ratio": 0.0},
+            ],
+        }
+        (stage / "candidates.private.jsonl").write_text(
+            json.dumps(candidates, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        return stage
+
+    def test_import_scelle_une_preference_claire(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = self._fixture(root)
+            scores = stage / "scores.jsonl"
+            scores.write_text(json.dumps({
+                "prompt_id": "p_1", "ranking": ["c_good", "c_bad"],
+                "scores": {"c_good": 4, "c_bad": 1}, "unsafe": [],
+            }) + "\n", encoding="utf-8")
+            report = import_scores("run", str(root), scores)
+            self.assertEqual(report["pairs"], 1)
+            self.assertTrue((stage / "pairs.sealed.jsonl").is_file())
+
+    def test_import_refuse_un_identifiant_invente(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = self._fixture(root)
+            scores = stage / "scores.jsonl"
+            scores.write_text(json.dumps({
+                "prompt_id": "p_1", "ranking": ["c_good", "c_forge"],
+                "scores": {"c_good": 4, "c_forge": 0}, "unsafe": [],
+            }) + "\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                import_scores("run", str(root), scores)
+
+
+class GateTests(unittest.TestCase):
+    def test_gate_refuse_un_profil_de_taches_different(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            common = {"summary": {"overall": {"tasks": 1, "pass@1": 0.0,
+                                                "pass@6": 0.5, "success_rate": 0.1,
+                                                "dynamic_rate": 1.0, "mean_entropy": 2.0}}}
+            baseline = {**common, "rows": [{"task_id": "a"}]}
+            candidate = {**common, "rows": [{"task_id": "b"}]}
+            bp, cp = root / "base.json", root / "candidate.json"
+            bp.write_text(json.dumps(baseline), encoding="utf-8")
+            cp.write_text(json.dumps(candidate), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                evaluate_gates(bp, cp)
 
 
 if __name__ == "__main__":

@@ -44,7 +44,7 @@ def _summary(rows: list[dict], k: int) -> dict:
 
 def profile(run: str, data_dir: str, out_dir: str, init_stage: str, init_ckpt: str,
             tasks: int, k: int, frontier_k: int, max_new: int, seed: int,
-            device: str) -> dict:
+            device: str, output: str = "profile.json") -> dict:
     if k < 2 or frontier_k < k:
         raise ValueError("il faut 2 <= k <= frontier-k")
     if device.startswith("cuda") and not torch.cuda.is_available():
@@ -99,7 +99,7 @@ def profile(run: str, data_dir: str, out_dir: str, init_stage: str, init_ckpt: s
     }
     stage = run_dir / "rlvr-v45"
     stage.mkdir(parents=True, exist_ok=True)
-    path = stage / "profile.json"
+    path = stage / Path(output).name
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
@@ -109,7 +109,8 @@ def profile(run: str, data_dir: str, out_dir: str, init_stage: str, init_ckpt: s
 
 def cmd_profile(args):
     profile(args.run, args.data_dir, args.out_dir, args.init_stage, args.init_ckpt,
-            args.tasks, args.k, args.frontier_k, args.max_new, args.seed, args.device)
+            args.tasks, args.k, args.frontier_k, args.max_new, args.seed, args.device,
+            args.output)
 
 
 def main():
@@ -125,6 +126,7 @@ def main():
     parser.add_argument("--max-new", type=int, default=112)
     parser.add_argument("--seed", type=int, default=455_001)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--output", default="profile.json")
     cmd_profile(parser.parse_args())
 
 

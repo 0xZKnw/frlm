@@ -303,16 +303,93 @@ execution than catastrophic loss of the v4.3 representation.
 The final/best step 736 is preferred over step 300: both score 5/40 on manually audited
 OOD v2, while step 736 retains more factual completions (5/12 corrected versus 3/12).
 The next RL/RLAIF experiment must run locally rather than on Modal after the SFT budget.
-It should use exact Python-verifiable rewards for arithmetic, composition, ordering,
-cycles and insufficient-information traps; keep an explicit KL reference to the v4.5
-SFT; replay both SFT and MID examples; penalize missing final answers, unsupported facts
-and reward hacking; and select checkpoints on sealed seeds and paraphrased families.
-Internal reward alone must never choose the release checkpoint.
+It uses exact Python-verifiable rewards on task families deliberately disjoint from OOD
+v2 (one-step equations, exact percentages, means, powers, grounded synthetic records,
+structured constraints, contradictory sources and non-numeric state updates). It keeps
+an explicit KL reference to the v4.5 SFT, replays curated supervised examples, penalizes
+missing final answers and repetition, and selects checkpoints on held-out generated
+tasks. Internal reward alone must never choose the release checkpoint.
 
 A recovery from 5/40 to roughly 7-9/40 is a plausible experimental target, not a promised
 result. Reaching 10-12/40 would be a strong outcome for a 229M model and the available
 local compute. The MID checkpoint remains the mandatory no-regression reference throughout
 RL, because its manually corrected 8/40 is still the best demonstrated v4 reasoning score.
+
+### v4.5 local RLVR and offline RLAIF
+
+All post-training in this section remains **v4.5**. `v5` is reserved for a future
+model trained from a new pretrain checkpoint; an RL or DPO pass does not rename the
+base model.
+
+The new local pipeline lives beside the historical `rl.py`/`rlaif.py` so old runs stay
+reproducible. It first profiles the SFT at pass@6 and reruns only frontier tasks at
+pass@32. RLVR then uses groups of six, three dynamic prompts per accepted update,
+DrGRPO advantages centered without standard-deviation scaling, a fixed token budget
+denominator, one on-policy epoch, typed verifiers and 5% supervised replay. Zero-success
+tasks are written to `needs_sft.jsonl` instead of receiving a misleading shaped reward.
+
+```bash
+# 1. Required frontier profile (no OOD v2 prompt is read).
+python run.py rl-profile-v45 --run fr-v4-v45-sft --data-dir data-v4 \
+  --init-stage sft --init-ckpt best --tasks 60 --k 6 --frontier-k 32 \
+  --max-new 112 --output profile.json
+
+# 2. Main local RTX 4060 run. Start with a short 10-update pilot, then resume.
+python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 \
+  --init-stage sft --init-ckpt best --ref-stage sft --ref-ckpt best \
+  --updates 10 --prompts 3 --group 6 --max-new 112 --micro-bs 2 \
+  --lr 2e-6 --kl-beta 0.018 --kl-target 0.012 --replay-weight 0.05
+python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 \
+  --updates 200 --resume latest
+```
+
+The frozen reference is intentionally fp32. A real RTX 4060 smoke test measured an
+initial token KL of about **0.96** with a bf16 reference despite identical source
+weights, versus **0.00084** in fp32. The generic bf16-memory recommendation from the
+audit is therefore unsafe for this v3 architecture. Policy parameters and AdamW remain
+fp32, forward passes use bf16 autocast, reference gradients are disabled, optimizer
+foreach is disabled, and only one CPU microbatch is moved to CUDA at a time.
+
+RLAIF is offline: candidate generation never waits for an external judge while the GPU
+is allocated. The judge packet contains only prompts and randomized anonymous outputs;
+it excludes canonical answers, Python rewards and private provenance. Imported rankings
+must cover exactly the issued candidate IDs, use integer scores 0..4, clear a margin,
+and pass truncation/repetition/safety filters before pairs are sealed for DPO.
+
+```bash
+python run.py rlaif-build-v45 --run fr-v4-v45-sft --data-dir data-v4 \
+  --init-stage rlvr-v45 --init-ckpt best --prompts 40 --candidates 6
+# Fill runs/fr-v4-v45-sft/rlaif-v45/scores.jsonl using JUDGE_INSTRUCTIONS.md.
+python run.py rlaif-import-v45 --run fr-v4-v45-sft \
+  --scores runs/fr-v4-v45-sft/rlaif-v45/scores.jsonl
+python run.py dpo-v45 --run fr-v4-v45-sft --data-dir data-v4 \
+  --init-stage rlvr-v45 --init-ckpt best --ref-stage rlvr-v45 --ref-ckpt best \
+  --epochs 1 --grad-accum 8 --lr 5e-7 --beta 0.10
+```
+
+After training, regenerate the same dev profile with `--output profile_post.json`,
+then compare it to the baseline. OOD v2 is evaluated only once on the candidate
+checkpoint. The benchmark writes a `.raw.json`; prepare and complete an exhaustive
+human correction before applying the final 7/40 reasoning and 5/12 factual floors.
+This prevents the substring-based false positives and answer-extraction false negatives
+observed in earlier reports.
+
+```bash
+python run.py rl-profile-v45 --run fr-v4-v45-sft --data-dir data-v4 \
+  --init-stage dpo-v45 --init-ckpt best --tasks 60 --k 6 --frontier-k 32 \
+  --output profile_post.json
+python -m frlm.posttrain_gates_v45 \
+  --baseline runs/fr-v4-v45-sft/rlvr-v45/profile.json \
+  --candidate runs/fr-v4-v45-sft/rlvr-v45/profile_post.json \
+  --output runs/fr-v4-v45-sft/posttrain_gates_dev.json
+
+python bench/bench_ood_v2.py --run fr-v4-v45-sft --data-dir data-v4 \
+  --stage dpo-v45 --ckpt ckpt_best.pt --hf none
+python -m bench.adjudicate_ood_v2 bench/reports/bench_ood_v2_fr-v4-v45-sft_dpo-v45_best.raw.json
+# Fill every manual_correct field in the generated .manual.json, then:
+python -m bench.adjudicate_ood_v2 \
+  bench/reports/bench_ood_v2_fr-v4-v45-sft_dpo-v45_best.raw.manual.json --finalize
+```
 
 ---
 

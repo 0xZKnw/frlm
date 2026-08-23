@@ -30,6 +30,7 @@
 #   python -m bench.bench_ood_v2 --run gpu1 --data-dir data-gpu1 --hf none
 #   --hf : all (défaut) | none (nos modèles seuls)
 # --------------------------------------------------------------------------------------
+import json
 import re
 import time
 from pathlib import Path
@@ -278,7 +279,7 @@ def main():
     print(f"[i] OOD v2 : {len(PROBLEMES)} problèmes "
           f"({', '.join(f'{c} {n}' for c, n in n_cat.items())}) · {len(FAITS)} faits\n")
 
-    lignes, details = [], []
+    lignes, details, raw_records = [], [], []
 
     # Un SEUL modèle en VRAM à la fois : chargé juste avant son tour, libéré juste
     # après. Charger tout le roster d'avance (comme le bench v1) sature les 8 Go
@@ -288,7 +289,7 @@ def main():
         t0 = time.time()
         par_cat = {c: [0, 0] for c in CATS}
         err_affichee = False   # 1re exception montrée en clair, les suivantes avalées
-        for prob in PROBLEMES:
+        for problem_index, prob in enumerate(PROBLEMES):
             try:
                 brut = m.repondre(prob["q"])
             except Exception as e:
@@ -303,9 +304,15 @@ def main():
             par_cat[prob["cat"]][1] += 1
             details.append((m.nom, prob["cat"], prob["q"], str(prob["attendu"]),
                             f"{rep} · texte : {brut.strip()[:200]}", bon))
+            raw_records.append({
+                "model": m.nom, "section": "reasoning", "item_index": problem_index,
+                "category": prob["cat"], "prompt": prob["q"],
+                "expected": str(prob["attendu"]), "extracted": rep,
+                "raw_answer": brut, "auto_correct": bool(bon),
+            })
 
         ok_faits = 0
-        for amorce, motif in FAITS:
+        for fact_index, (amorce, motif) in enumerate(FAITS):
             try:
                 gen = m.completer(amorce)
             except Exception:
@@ -318,6 +325,12 @@ def main():
             bon = re.search(motif, gen, re.IGNORECASE) is not None
             ok_faits += bon
             details.append((m.nom, "fait", amorce, motif, gen.strip()[:100], bon))
+            raw_records.append({
+                "model": m.nom, "section": "facts", "item_index": fact_index,
+                "category": "fait", "prompt": amorce, "expected": motif,
+                "extracted": gen.strip()[:100], "raw_answer": gen,
+                "auto_correct": bool(bon),
+            })
 
         total_ok = sum(v[0] for v in par_cat.values())
         scores = " · ".join(f"{c} {v[0]}/{v[1]}" for c, v in par_cat.items())
@@ -367,7 +380,14 @@ def main():
         for nom, cat, q, attendu, obtenu, bon in details:
             f.write(f"- {'✅' if bon else '❌'} `{cat}` **{nom}** — {q!r} → "
                     f"attendu {attendu!r}, obtenu {obtenu!r}\n")
+    raw_path = rap.with_suffix(".raw.json")
+    raw_path.write_text(json.dumps({
+        "schema": "frlm-ood-v2-raw-1", "created_unix": time.time(),
+        "run": a.run, "stage": a.stage, "checkpoint": a.ckpt,
+        "records": raw_records,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n[i] rapport détaillé : {rap}")
+    print(f"[i] réponses brutes pour correction manuelle : {raw_path}")
 
 
 if __name__ == "__main__":

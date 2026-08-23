@@ -30,6 +30,11 @@ utilisateurs et pour les explications métier.
 - `frlm/optim.py` : Muon, AdamW et schedules de learning rate.
 - `frlm/rl.py` : GRPO avec récompenses vérifiables.
 - `frlm/rlaif.py` : GRPO avec juge LLM et protocole d'échange par fichiers.
+- `frlm/rl_tasks_v45.py`, `frlm/verifiers_v45.py` : tâches RLVR non-OOD et
+  vérificateurs typés stricts du post-training v4.5.
+- `frlm/rl_profile_v45.py`, `frlm/rl_v45.py` : profil pass@k et DrGRPO local v4.5.
+- `frlm/rlaif_offline_v45.py`, `frlm/dpo_v45.py` : candidats aveugles, paires
+  scellées et préférence hors-ligne v4.5.
 - `frlm/distill.py` : génération et filtrage de données de distillation via API.
 - `frlm/bench_speed.py` : mesure GPU du débit, de la VRAM et du MFU.
 - `bench/` : benchmarks de qualité et rapports Markdown.
@@ -146,6 +151,37 @@ OpenHermes-FR à 12 %. Les 736 steps correspondent à environ 1,15 passe pour 24
 tokens assistant et 37,5k tokens supervisés par update. Réexécuter l'audit après
 chaque rebuild et ajuster ce nombre si la densité change, sans relancer le mid.
 
+Le post-training local suivant reste nommé **v4.5** ; réserver `v5` à un futur
+pré-entraînement neuf. Le pipeline corrigé ne remplace pas les anciens `rl.py` et
+`rlaif.py`, afin de garder leurs runs reproductibles :
+
+```powershell
+python run.py rl-profile-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage sft --init-ckpt best --tasks 60 --k 6 --frontier-k 32 --max-new 112 --output profile.json
+python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage sft --init-ckpt best --ref-stage sft --ref-ckpt best --updates 10 --prompts 3 --group 6 --max-new 112 --micro-bs 2 --lr 2e-6 --kl-beta 0.018 --kl-target 0.012 --replay-weight 0.05
+python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 --updates 200 --resume latest
+python run.py rlaif-build-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage rlvr-v45 --init-ckpt best --prompts 40 --candidates 6
+python run.py rlaif-import-v45 --run fr-v4-v45-sft --scores runs/fr-v4-v45-sft/rlaif-v45/scores.jsonl
+python run.py dpo-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage rlvr-v45 --init-ckpt best --ref-stage rlvr-v45 --ref-ckpt best --epochs 1 --grad-accum 8 --lr 5e-7 --beta 0.10
+```
+
+Le profil pass@6/pass@32 est obligatoire avant RLVR. Le trainer retient un groupe
+uniquement si son nombre de réussites primaires est strictement entre 0 et G ; il
+centre les avantages sans division par l'écart-type, impose T=1/top-p=1 et un seul
+epoch on-policy. Les groupes sans aucune réussite vont dans `needs_sft.jsonl`. Le
+replay de 5 % utilise des exemples supervisés vérifiés et conversationnels propres.
+
+Sur model_v3, une ancre KL bf16 a produit une KL initiale artificielle d'environ
+0,96 contre 0,00084 en fp32 lors du smoke test RTX 4060. Conserver donc la référence
+gelée en fp32 malgré la recommandation mémoire générique ; policy/AdamW restent fp32,
+les forwards utilisent autocast bf16, `foreach=False` et `micro_bs<=2`.
+
+Les familles générées par `rl_tasks_v45.py` doivent rester structurellement disjointes
+des familles OOD v2. En particulier, ne jamais y ajouter transitivité, information
+absente/hors sujet, fencepost/intervalles, comparaison de branches, reste euclidien,
+cycle de jours ou composition arithmétique multi-opérations. Le test
+`test_no_ood_v2_family_is_generated` protège la liste connue mais ne remplace pas une
+revue humaine de toute nouvelle famille.
+
 Benchmarks :
 
 ```powershell
@@ -223,6 +259,13 @@ valider sur CPU les bins, métadonnées et checkpoints du Volume sans allouer de
   corriger les faux positifs et faux négatifs du vérificateur Python.
 - Une nouvelle passe doit utiliser un nouveau `--stage-name` (`rlaif2`, etc.) pour
   ne pas écraser le meilleur checkpoint de la passe précédente.
+- Pour le pipeline v4.5, préférer `rlaif_offline_v45.py` : générer les candidats,
+  libérer le GPU, faire juger le paquet aveugle, valider/sceller les paires, puis
+  lancer `dpo-v45`. Le paquet juge ne doit jamais contenir réponse canonique, score
+  Python, provenance privée ou ordre non randomisé.
+- Un classement v4.5 doit reprendre exactement tous les IDs émis. Refuser les IDs
+  inventés, candidats dangereux/tronqués/répétitifs, égalités sans marge et fichiers
+  de paires dont le hash diffère du manifest.
 
 ## Style de code
 

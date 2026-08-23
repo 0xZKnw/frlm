@@ -1348,6 +1348,7 @@ def main():
     p.add_argument("--max-new", type=int, default=112)
     p.add_argument("--seed", type=int, default=455001)
     p.add_argument("--device", default="cuda")
+    p.add_argument("--output", default="profile.json")
 
     p = sub.add_parser("rl-v45",
                        help="RLVR DrGRPO local v4.5, mémoire bornée et replay supervisé")
@@ -1376,6 +1377,51 @@ def main():
     p.add_argument("--seed", type=int, default=455100)
     p.add_argument("--device", default="cuda")
     p.add_argument("--allow-no-profile", action="store_true")
+    p.add_argument("--resume", nargs="?", const="latest", default=None)
+
+    p = sub.add_parser("rlaif-build-v45",
+                       help="génère hors-ligne les candidats et un paquet aveugle pour le juge")
+    p.add_argument("--run", default="fr-v4-v45-sft")
+    p.add_argument("--data-dir", default="data-v4")
+    p.add_argument("--out-dir", default="runs")
+    p.add_argument("--init-stage", default="rlvr-v45")
+    p.add_argument("--init-ckpt", default="best")
+    p.add_argument("--pool", default="data-v4/rlaif_prompts.jsonl,data-v4/rlaif_prompts_v2.jsonl")
+    p.add_argument("--prompts", type=int, default=40)
+    p.add_argument("--candidates", type=int, default=6)
+    p.add_argument("--max-new", type=int, default=160)
+    p.add_argument("--seed", type=int, default=455200)
+    p.add_argument("--device", default="cuda")
+
+    p = sub.add_parser("rlaif-import-v45",
+                       help="valide les classements aveugles et scelle les paires DPO")
+    p.add_argument("--run", default="fr-v4-v45-sft")
+    p.add_argument("--out-dir", default="runs")
+    p.add_argument("--scores", required=True)
+    p.add_argument("--min-margin", type=int, default=1)
+    p.add_argument("--max-pairs", type=int, default=2)
+
+    p = sub.add_parser("dpo-v45", help="préférence offline locale sur les paires RLAIF v4.5")
+    p.add_argument("--run", default="fr-v4-v45-sft")
+    p.add_argument("--data-dir", default="data-v4")
+    p.add_argument("--out-dir", default="runs")
+    p.add_argument("--stage-name", default="dpo-v45")
+    p.add_argument("--init-stage", default="rlvr-v45")
+    p.add_argument("--init-ckpt", default="best")
+    p.add_argument("--ref-stage", default="rlvr-v45")
+    p.add_argument("--ref-ckpt", default="best")
+    p.add_argument("--pairs", default="")
+    p.add_argument("--epochs", type=int, default=1)
+    p.add_argument("--grad-accum", type=int, default=8)
+    p.add_argument("--max-steps", type=int, default=120)
+    p.add_argument("--seq-len", type=int, default=512)
+    p.add_argument("--lr", type=float, default=5e-7)
+    p.add_argument("--beta", type=float, default=0.10)
+    p.add_argument("--replay-weight", type=float, default=0.03)
+    p.add_argument("--eval-every", type=int, default=10)
+    p.add_argument("--save-every", type=int, default=10)
+    p.add_argument("--seed", type=int, default=455300)
+    p.add_argument("--device", default="cuda")
     p.add_argument("--resume", nargs="?", const="latest", default=None)
 
     p = sub.add_parser("rlaif", help="GRPO à juge LLM : pool quotidien + protocole fichiers (voir frlm/rlaif.py)")
@@ -1514,6 +1560,18 @@ def main():
     elif args.cmd == "rl-v45":
         from frlm.rl_v45 import cmd_rl_v45
         cmd_rl_v45(args)
+
+    elif args.cmd == "rlaif-build-v45":
+        from frlm.rlaif_offline_v45 import cmd_build
+        cmd_build(args)
+
+    elif args.cmd == "rlaif-import-v45":
+        from frlm.rlaif_offline_v45 import cmd_import
+        cmd_import(args)
+
+    elif args.cmd == "dpo-v45":
+        from frlm.dpo_v45 import cmd_dpo
+        cmd_dpo(args)
 
     elif args.cmd == "rlaif":
         from frlm.rlaif import cmd_rlaif
