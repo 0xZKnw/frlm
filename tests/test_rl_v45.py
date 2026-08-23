@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import random
 import tempfile
 import unittest
 from pathlib import Path
 
 from frlm.rlaif_offline_v45 import _read_prompts, import_scores
 from frlm.posttrain_gates_v45 import evaluate_gates
-from frlm.rl_tasks_v45 import make_task
+from frlm.rl_v45 import RLVRConfig, RLVRTrainer, _canonical_answer
+from frlm.rl_tasks_v45 import SCHEMAS_BY_CAPABILITY, make_task
 from frlm.verifiers_v45 import AnswerSpec, final_text, verify
 
 
@@ -75,6 +77,44 @@ class TaskTests(unittest.TestCase):
                      "weekly_cycle", "compare_totals", "stock_three_ops"}
         schemas = {make_task(20_000 + index).schema_id for index in range(600)}
         self.assertTrue(schemas.isdisjoint(forbidden), schemas & forbidden)
+
+    def test_schema_force_garde_une_reponse_verifiable(self):
+        schemas = {
+            "reasoning_program": "linear_equation", "grounded": "grounded_rooms",
+            "constraints": "constraint_number_only", "code": "code_1",
+            "uncertainty": "contradictory_sources", "state_tracking": "state_update",
+        }
+        for index, (capability, schema) in enumerate(schemas.items()):
+            task = make_task(30_000 + index, capability=capability, schema_id=schema)
+            self.assertEqual(task.schema_id, schema)
+            self.assertTrue(verify(task.answer, _canonical_answer(task)).primary_success)
+
+    def test_curriculum_rl_est_pilote_par_le_profil(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.cfg = RLVRConfig(require_profile=True)
+        trainer.profile = {"config": {"k": 6}, "rows": [
+            {"capability": "code", "schema_id": "code_1", "difficulty": 0.3,
+             "initial_successes": 1},
+            {"capability": "reasoning_program", "schema_id": "linear_equation",
+             "difficulty": 0.1, "initial_successes": 0},
+            {"capability": "grounded", "schema_id": "grounded_year", "difficulty": 0.2,
+             "initial_successes": 6},
+        ]}
+        frontier, bridge = trainer._profile_curriculum()
+        self.assertEqual({row["schema_id"] for row in frontier}, {"code_1"})
+        bridge_schemas = {row["schema_id"] for row in bridge}
+        self.assertIn("linear_equation", bridge_schemas)
+        self.assertIn("small_power", bridge_schemas)
+        self.assertNotIn("code_1", bridge_schemas)
+        self.assertNotIn("grounded_year", bridge_schemas)
+
+        trainer.frontier_specs, trainer.bridge_specs = frontier, bridge
+        trainer.rng = random.Random(45)
+        trainer.difficulty = {capability: 0.25 for capability in SCHEMAS_BY_CAPABILITY}
+        trainer.rollout_index = 0
+        sampled = [trainer._next_task().schema_id for _ in range(100)]
+        self.assertGreaterEqual(sampled.count("code_1"), 65)
+        self.assertGreaterEqual(len(sampled) - sampled.count("code_1"), 10)
 
 
 class OfflineRLAIFTests(unittest.TestCase):

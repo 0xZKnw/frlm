@@ -169,6 +169,11 @@ uniquement si son nombre de réussites primaires est strictement entre 0 et G ; 
 centre les avantages sans division par l'écart-type, impose T=1/top-p=1 et un seul
 epoch on-policy. Les groupes sans aucune réussite vont dans `needs_sft.jsonl`. Le
 replay de 5 % utilise des exemples supervisés vérifiés et conversationnels propres.
+Le scheduler lit et hache `profile.json` : 80 % des prompts ciblent les lignes
+dynamiques mesurées et 20 % explorent les schémas à zéro succès ou absents du petit
+profil. Ces derniers reçoivent aussi un bridge supervisé canonique dans le replay. Refuser une reprise si le hash du
+profil diffère, et ne pas remplacer ce curriculum par un tirage uniforme sans nouvelle
+mesure pass@k.
 
 Sur model_v3, une ancre KL bf16 a produit une KL initiale artificielle d'environ
 0,96 contre 0,00084 en fp32 lors du smoke test RTX 4060. Conserver donc la référence

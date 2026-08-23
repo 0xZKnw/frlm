@@ -8,6 +8,7 @@ des échecs primaires. Les avantages DrGRPO sont centrés sans division par std.
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import math
 import os
@@ -27,7 +28,7 @@ from frlm import data as D
 from frlm.rl_engine_v45 import (
     RolloutEngine, clone_reference, load_policy, resolve_checkpoint, resolve_tokenizer,
 )
-from frlm.rl_tasks_v45 import CAPABILITY_WEIGHTS, TaskSpec, make_task
+from frlm.rl_tasks_v45 import CAPABILITY_WEIGHTS, SCHEMAS_BY_CAPABILITY, TaskSpec, make_task
 from frlm.verifiers_v45 import final_text, verify
 
 
@@ -106,7 +107,7 @@ def _canonical_answer(task: TaskSpec) -> str:
     if task.answer.kind == "json":
         return json.dumps(task.answer.value, ensure_ascii=False, separators=(",", ":"))
     if task.answer.kind == "abstain":
-        return "Les informations fournies ne permettent pas de le déterminer."
+        return "Le contexte ne permet pas de le déterminer."
     if task.answer.kind == "code":
         name = task.answer.function_name
         if task.schema_id == "code_0":
@@ -136,6 +137,11 @@ class RLVRTrainer:
             raise RuntimeError(
                 f"profil pass@k absent : {profile_path}. Lance d'abord `python run.py rl-profile-v45`."
             )
+        self.profile = (json.loads(profile_path.read_text(encoding="utf-8"))
+                        if profile_path.is_file() else None)
+        self.profile_sha256 = (hashlib.sha256(profile_path.read_bytes()).hexdigest()
+                               if profile_path.is_file() else None)
+        self.frontier_specs, self.bridge_specs = self._profile_curriculum()
         self.tok = D.load_tokenizer(resolve_tokenizer(self.run_dir, Path(cfg.data_dir)))
         init_path = resolve_checkpoint(self.run_dir, cfg.init_stage, cfg.init_ckpt)
         self.model, self.mcfg, self.init_meta = load_policy(init_path, self.device, torch.float32)
@@ -176,9 +182,51 @@ class RLVRTrainer:
             self._resume(resume)
         (self.stage_dir / "config.json").write_text(
             json.dumps({"rlvr_v45": asdict(cfg), "model": self.mcfg.to_dict(),
-                        "init": self.init_meta, "reference": self.ref_meta},
+                        "init": self.init_meta, "reference": self.ref_meta,
+                        "profile_sha256": self.profile_sha256,
+                        "frontier_schemas": sorted({row["schema_id"]
+                                                    for row in self.frontier_specs}),
+                        "bridge_schemas": sorted({row["schema_id"]
+                                                  for row in self.bridge_specs})},
                        ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+    def _profile_curriculum(self):
+        if self.profile is None:
+            return [], []
+        k = int(self.profile["config"]["k"])
+        rows = self.profile["rows"]
+        frontier = []
+        schema_has_success = defaultdict(bool)
+        schema_rows = defaultdict(list)
+        for row in rows:
+            schema_rows[(row["capability"], row["schema_id"])].append(row)
+            schema_has_success[(row["capability"], row["schema_id"])] |= \
+                int(row["initial_successes"]) > 0
+            successes = int(row["initial_successes"])
+            if 0 < successes < k:
+                probability = successes / k
+                frontier.append({
+                    "capability": row["capability"], "schema_id": row["schema_id"],
+                    "difficulty": float(row["difficulty"]),
+                    "weight": max(0.02, probability * (1.0 - probability)),
+                })
+        bridge = []
+        all_schemas = {(capability, schema_id)
+                       for capability, schemas in SCHEMAS_BY_CAPABILITY.items()
+                       for schema_id in schemas}
+        for key in sorted(all_schemas):
+            grouped = schema_rows.get(key, [])
+            if schema_has_success[key]:
+                continue
+            capability, schema_id = key
+            bridge.append({"capability": capability, "schema_id": schema_id,
+                           "difficulty": (min(float(row["difficulty"]) for row in grouped)
+                                          if grouped else 0.20),
+                           "weight": 1.0})
+        if self.cfg.require_profile and not frontier:
+            raise RuntimeError("le profil ne contient aucun groupe dynamique : bridge SFT requis avant RL")
+        return frontier, bridge
 
     def _checkpoint_payload(self) -> dict:
         return {
@@ -189,7 +237,7 @@ class RLVRTrainer:
             "tokens_seen": self.init_meta.get("tokens_seen", 0) + self.tokens_generated,
             "tokens_generated": self.tokens_generated, "kl_beta": self.kl_beta,
             "best_score": self.best_score, "baseline_score": self.baseline_score,
-            "difficulty": self.difficulty,
+            "difficulty": self.difficulty, "profile_sha256": self.profile_sha256,
             "rng": {"python": self.rng.getstate(), "torch": torch.get_rng_state(),
                     "cuda": torch.cuda.get_rng_state_all() if self.use_cuda else None,
                     "numpy": np.random.get_state()},
@@ -211,6 +259,8 @@ class RLVRTrainer:
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         if checkpoint.get("stage") != self.cfg.stage_name:
             raise ValueError(f"mauvaise phase dans {path}")
+        if checkpoint.get("profile_sha256") not in (None, self.profile_sha256):
+            raise ValueError("le profil pass@k a changé depuis ce checkpoint RLVR")
         self.model.load_state_dict(checkpoint["model"])
         self.optimizer.load_state_dict(checkpoint["optimizers"][0])
         self.update = int(checkpoint["accepted_updates"])
@@ -234,11 +284,24 @@ class RLVRTrainer:
         print(f"[i] Reprise RLVR v4.5 : {path.name}, update {self.update}")
 
     def _next_task(self) -> TaskSpec:
-        names, weights = zip(*CAPABILITY_WEIGHTS.items())
-        capability = self.rng.choices(names, weights=weights, k=1)[0]
+        if self.frontier_specs and (not self.bridge_specs or self.rng.random() >= 0.20):
+            spec = self.rng.choices(
+                self.frontier_specs,
+                weights=[row["weight"] for row in self.frontier_specs], k=1,
+            )[0]
+        elif self.bridge_specs:
+            spec = self.rng.choice(self.bridge_specs)
+        else:
+            names, weights = zip(*CAPABILITY_WEIGHTS.items())
+            capability = self.rng.choices(names, weights=weights, k=1)[0]
+            spec = {"capability": capability, "schema_id": None,
+                    "difficulty": self.difficulty[capability]}
+        capability = spec["capability"]
         seed = self.cfg.seed + 1_000_000 + self.rollout_index * 31
         self.rollout_index += 1
-        return make_task(seed, "train", self.difficulty[capability], capability)
+        offset = self.difficulty[capability] - 0.25
+        difficulty = max(0.05, min(0.95, float(spec["difficulty"]) + offset))
+        return make_task(seed, "train", difficulty, capability, spec["schema_id"])
 
     def _reward(self, task: TaskSpec, sample) -> tuple[float, bool, str | None]:
         result = verify(task.answer, sample.text)
@@ -323,14 +386,16 @@ class RLVRTrainer:
     def _replay_batch(self):
         batch = []
         for index in range(self.cfg.micro_bs):
-            if self.rng.random() < 0.55:
+            if not self.bridge_specs or self.rng.random() >= 0.70:
                 question, answer = self.rng.choice(_CURATED_REPLAY)
                 prompt = D.render_chat([{"role": "user", "text": question}]) + f"{D.IM_START}assistant\n"
                 completion = f"{D.THINK}\n\n{D.THINK_END}\n{answer}{D.IM_END}\n"
             else:
-                capability = self.rng.choice(tuple(CAPABILITY_WEIGHTS))
+                spec = self.rng.choice(self.bridge_specs)
+                capability = spec["capability"]
                 task = make_task(self.cfg.seed + 9_000_000 + self.rollout_index + index,
-                                 "train", min(0.55, self.difficulty[capability]), capability)
+                                 "train", min(0.45, float(spec["difficulty"])), capability,
+                                 spec["schema_id"])
                 prompt_ids, prefill = self.engine.prompt(task)
                 prompt = None
                 completion = _canonical_answer(task) + f"{D.IM_END}\n"
@@ -404,10 +469,21 @@ class RLVRTrainer:
         self.model.eval()
         scores = defaultdict(list)
         rows = []
-        capabilities = tuple(CAPABILITY_WEIGHTS)
-        for index in range(self.cfg.eval_tasks):
-            capability = capabilities[index % len(capabilities)]
-            task = make_task(455_700 + index * 101, "dev", 0.45, capability)
+        if self.profile is not None:
+            eval_rows = self.profile["rows"][:self.cfg.eval_tasks]
+            profile_seed = int(self.profile["config"]["seed"])
+            tasks = [make_task(profile_seed + index * 17, "dev", row["difficulty"],
+                               row["capability"])
+                     for index, row in enumerate(eval_rows)]
+            if any(task.task_id != row["task_id"] for task, row in zip(tasks, eval_rows)):
+                raise RuntimeError("impossible de reconstruire les tâches dev du profil")
+        else:
+            capabilities = tuple(CAPABILITY_WEIGHTS)
+            tasks = [make_task(455_700 + index * 101, "dev", 0.45,
+                               capabilities[index % len(capabilities)])
+                     for index in range(self.cfg.eval_tasks)]
+        for task in tasks:
+            capability = task.capability
             sample = self.engine.greedy(task)
             result = verify(task.answer, sample.text)
             scores[capability].append(float(result.primary_success))
@@ -430,6 +506,11 @@ class RLVRTrainer:
             print(f"[i] Baseline dev macro : {self.baseline_score:.3f}")
         print(f"[i] RLVR v4.5 local · cible {self.cfg.accepted_updates} updates acceptées · "
               f"{self.cfg.prompts_per_update}×{self.cfg.group_size} rollouts · lr {self.cfg.lr:.1e}")
+        if self.profile is not None:
+            frontier = ", ".join(sorted({row["schema_id"] for row in self.frontier_specs}))
+            bridge = ", ".join(sorted({row["schema_id"] for row in self.bridge_specs}))
+            print(f"[i] Curriculum profilé · 80 % frontière [{frontier}] · "
+                  f"20 % exploration bridge [{bridge}]")
 
         def stop(_signum, _frame):
             self.stop_requested = True

@@ -22,6 +22,16 @@ CAPABILITY_WEIGHTS = {
     "uncertainty": 0.10,
     "state_tracking": 0.10,
 }
+
+SCHEMAS_BY_CAPABILITY = {
+    "reasoning_program": ("linear_equation", "mean_three", "exact_percentage",
+                          "small_power", "signed_product"),
+    "grounded": ("grounded_year", "grounded_rooms", "grounded_height"),
+    "constraints": ("constraint_number_only", "constraint_json"),
+    "code": ("code_0", "code_1", "code_2"),
+    "uncertainty": ("contradictory_sources",),
+    "state_tracking": ("state_update",),
+}
 NAMES = ("Aïcha", "Bastien", "Chloé", "Dina", "Émile", "Fatou", "Gabriel", "Hana")
 OBJECTS = ("pommes", "jetons", "cartes", "cahiers", "perles", "tickets")
 
@@ -66,12 +76,15 @@ def _surface(rng: random.Random, split: Split, train: tuple[str, ...], dev: tupl
     return choices[index], f"{split}:{index}"
 
 
-def _reasoning(rng: random.Random, seed: int, split: Split, difficulty: float) -> TaskSpec:
+def _reasoning(rng: random.Random, seed: int, split: Split, difficulty: float,
+               forced_schema: str | None = None) -> TaskSpec:
     # Ne jamais ajouter ici intervalle/fencepost, reste euclidien, cycle de jours,
     # comparaison de branches, transitivité ou composition multi-opérations : ce
     # sont les familles scellées du benchmark OOD v2.
-    schemas = ("linear_equation", "mean_three", "exact_percentage", "small_power", "signed_product")
-    schema = rng.choice(schemas)
+    schemas = SCHEMAS_BY_CAPABILITY["reasoning_program"]
+    schema = forced_schema or rng.choice(schemas)
+    if schema not in schemas:
+        raise ValueError(f"schéma reasoning inconnu : {schema}")
     scale = 20 + int(180 * difficulty)
     trace: list[str]
     if schema == "linear_equation":
@@ -150,12 +163,16 @@ def _reasoning(rng: random.Random, seed: int, split: Split, difficulty: float) -
                     tuple(trace), "typed_v45_1", seed, requires_trace=difficulty >= 0.75)
 
 
-def _grounded(rng: random.Random, seed: int, split: Split, difficulty: float) -> TaskSpec:
+def _grounded(rng: random.Random, seed: int, split: Split, difficulty: float,
+              forced_schema: str | None = None) -> TaskSpec:
     town = rng.choice(("Aubeterre", "Belrive", "Clairval", "Montbois", "Rochebrune"))
     year, rooms, height = rng.randint(1840, 2020), rng.randint(3, 30), rng.randint(12, 90)
     context = (f"La station de {town} a ouvert en {year}. Le bâtiment mesure {height} mètres "
                f"et contient {rooms} salles. Sa mission est d'observer le climat local.")
-    field = rng.choice(("year", "rooms", "height"))
+    field = forced_schema.removeprefix("grounded_") if forced_schema else \
+        rng.choice(("year", "rooms", "height"))
+    if field not in ("year", "rooms", "height"):
+        raise ValueError(f"schéma grounded inconnu : {forced_schema}")
     question = {"year": "En quelle année a-t-elle ouvert ?",
                 "rooms": "Combien contient-elle de salles ?",
                 "height": "Quelle est sa hauteur en mètres ?"}[field]
@@ -172,10 +189,15 @@ def _grounded(rng: random.Random, seed: int, split: Split, difficulty: float) ->
                     (f"Le champ {field} vaut {value}.",), "typed_v45_1", seed)
 
 
-def _constraints(rng: random.Random, seed: int, split: Split, difficulty: float) -> TaskSpec:
+def _constraints(rng: random.Random, seed: int, split: Split, difficulty: float,
+                 forced_schema: str | None = None) -> TaskSpec:
     a, b = rng.randint(2, 90), rng.randint(2, 90)
     total = a + b
-    if rng.random() < 0.55:
+    number_only = (forced_schema == "constraint_number_only" if forced_schema
+                   else rng.random() < 0.55)
+    if forced_schema not in (None, "constraint_number_only", "constraint_json"):
+        raise ValueError(f"schéma constraints inconnu : {forced_schema}")
+    if number_only:
         prompt = f"Combien font {a} + {b} ? Réponds uniquement par le nombre."
         answer = AnswerSpec("integer", total)
         schema, program = "constraint_number_only", {"op": "add", "args": [a, b], "format": "number"}
@@ -191,7 +213,10 @@ def _constraints(rng: random.Random, seed: int, split: Split, difficulty: float)
                     "typed_v45_1", seed)
 
 
-def _uncertainty(rng: random.Random, seed: int, split: Split, difficulty: float) -> TaskSpec:
+def _uncertainty(rng: random.Random, seed: int, split: Split, difficulty: float,
+                 forced_schema: str | None = None) -> TaskSpec:
+    if forced_schema not in (None, "contradictory_sources"):
+        raise ValueError(f"schéma uncertainty inconnu : {forced_schema}")
     code_a = rng.choice(("AX-12", "BR-7", "CT-44", "DX-9"))
     code_b = rng.choice(tuple(code for code in ("AX-12", "BR-7", "CT-44", "DX-9")
                               if code != code_a))
@@ -205,7 +230,10 @@ def _uncertainty(rng: random.Random, seed: int, split: Split, difficulty: float)
                     ("Les deux sources de même autorité se contredisent.",), "typed_v45_1", seed)
 
 
-def _state(rng: random.Random, seed: int, split: Split, difficulty: float) -> TaskSpec:
+def _state(rng: random.Random, seed: int, split: Split, difficulty: float,
+           forced_schema: str | None = None) -> TaskSpec:
+    if forced_schema not in (None, "state_update"):
+        raise ValueError(f"schéma state inconnu : {forced_schema}")
     colors = ("rouge", "bleu", "vert", "jaune")
     first = rng.choice(colors)
     second = rng.choice(tuple(color for color in colors if color != first))
@@ -222,9 +250,12 @@ def _state(rng: random.Random, seed: int, split: Split, difficulty: float) -> Ta
                     "typed_v45_1", seed)
 
 
-def _code(rng: random.Random, seed: int, split: Split, difficulty: float) -> TaskSpec:
+def _code(rng: random.Random, seed: int, split: Split, difficulty: float,
+          forced_schema: str | None = None) -> TaskSpec:
     suffix = seed % 1_000_000
-    kind = rng.randrange(3)
+    kind = int(forced_schema.removeprefix("code_")) if forced_schema else rng.randrange(3)
+    if kind not in (0, 1, 2):
+        raise ValueError(f"schéma code inconnu : {forced_schema}")
     if kind == 0:
         name = f"double_{suffix}"
         prompt = f"Écris uniquement le code Python d'une fonction `{name}(n)` qui renvoie le double de n."
@@ -246,7 +277,7 @@ def _code(rng: random.Random, seed: int, split: Split, difficulty: float) -> Tas
 
 
 def make_task(seed: int, split: Split = "train", difficulty: float = 0.35,
-              capability: str | None = None) -> TaskSpec:
+              capability: str | None = None, schema_id: str | None = None) -> TaskSpec:
     if split not in ("train", "dev"):
         raise ValueError("les tâches sealed vivent hors du générateur de train")
     difficulty = max(0.0, min(1.0, float(difficulty)))
@@ -261,7 +292,7 @@ def make_task(seed: int, split: Split = "train", difficulty: float = 0.35,
     }
     if capability not in factories:
         raise ValueError(f"capacité RL inconnue : {capability}")
-    return factories[capability](rng, seed, split, difficulty)
+    return factories[capability](rng, seed, split, difficulty, schema_id)
 
 
 def write_bank(path: Path, count: int, split: Split, seed: int = 451_900) -> dict:

@@ -328,6 +328,15 @@ DrGRPO advantages centered without standard-deviation scaling, a fixed token bud
 denominator, one on-policy epoch, typed verifiers and 5% supervised replay. Zero-success
 tasks are written to `needs_sft.jsonl` instead of receiving a misleading shaped reward.
 
+The measured pre-RL profile of the final v4.5 SFT contains **3/60 pass@1**, **11/60
+pass@6** and **10/60 dynamic groups**. The usable frontier is concentrated in
+`grounded_rooms`, `code_1`, `constraint_number_only` and one `state_update` task;
+`reasoning_program` and `uncertainty` are 0/6 throughout. The trainer therefore reads
+and hashes `profile.json`, spends 80% of on-policy prompts on measured frontier rows,
+and reserves 20% for zero-success or unmeasured schemas. Those schemas additionally
+receive canonical supervised bridge replay. A resume is refused if the profile changed.
+This is a curriculum decision, not a post-RL quality result.
+
 ```bash
 # 1. Required frontier profile (no OOD v2 prompt is read).
 python run.py rl-profile-v45 --run fr-v4-v45-sft --data-dir data-v4 \
