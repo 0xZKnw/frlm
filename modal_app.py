@@ -39,7 +39,8 @@ PEAK_TFLOPS = {"l40s": 181.0, "a100": 312.0, "h100": 989.0, "b200": 2250.0}
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("torch", "numpy", "tokenizers", "rich", "nvidia-ml-py")
+    .pip_install("torch", "numpy", "tokenizers", "rich", "nvidia-ml-py",
+                 "datasets>=2.19", "tqdm>=4.66")
     .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
     .add_local_dir(".", remote_path="/root/app",
                    ignore=["data*/**", "runs/**", ".git/**", "**/__pycache__/**",
@@ -102,9 +103,16 @@ def _required_files(cmd: str, root: Path = Path("/root/app")) -> tuple[str | Non
         return stage, [], []
 
     data_dir = _workspace_path(_arg(parts, "--data-dir", "data") or "data", root)
-    prefix = {"train": "", "mid": "mid_", "sft": "sft_"}[stage]
-    required = [data_dir / "tokenizer.json", data_dir / f"{prefix}train.bin",
-                data_dir / f"{prefix}val.bin"]
+    curriculum = _arg(parts, "--mid-curriculum", "") or ""
+    if stage == "mid" and curriculum:
+        required = [data_dir / "tokenizer.json",
+                    data_dir / "mid_v43_stage1_train.bin",
+                    data_dir / "mid_v43_stage2_train.bin",
+                    data_dir / "mid_v43_val.bin"]
+    else:
+        prefix = {"train": "", "mid": "mid_", "sft": "sft_"}[stage]
+        required = [data_dir / "tokenizer.json", data_dir / f"{prefix}train.bin",
+                    data_dir / f"{prefix}val.bin"]
     if stage == "sft":
         required += [data_dir / "sft_train.mask", data_dir / "sft_val.mask"]
         replay_frac = float(_arg(parts, "--replay-frac", "0") or "0")
@@ -153,11 +161,24 @@ def _check_command(cmd: str) -> None:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if stage == "sft" and (meta.get("sft") or {}).get("recipe") != "v4.2-quality-replay":
                 raise ValueError("meta.json ne décrit pas la recette v4.2-quality-replay")
-            section = meta["midtrain"] if stage == "mid" else meta["sft"]
-            expected = {
-                required[1]: int(section["train_tokens"]) * 2,
-                required[2]: int(section["val_tokens"]) * 2,
-            }
+            curriculum = _arg(shlex.split(cmd), "--mid-curriculum", "") or ""
+            if stage == "mid" and curriculum:
+                section = meta["midtrain_v43"]
+                if section.get("recipe") != "v4.3-curriculum-1.5b":
+                    raise ValueError("meta.json ne décrit pas la recette mid v4.3")
+                expected = {
+                    data_dir / stage_meta["path"]: int(stage_meta["train_tokens"]) * 2
+                    for stage_meta in section["stages"]
+                }
+                expected[data_dir / section["validation"]["path"]] = (
+                    int(section["validation"]["val_tokens"]) * 2
+                )
+            else:
+                section = meta["midtrain"] if stage == "mid" else meta["sft"]
+                expected = {
+                    required[1]: int(section["train_tokens"]) * 2,
+                    required[2]: int(section["val_tokens"]) * 2,
+                }
             if stage == "sft":
                 expected[required[3]] = int(section["train_tokens"])
                 expected[required[4]] = int(section["val_tokens"])
@@ -241,10 +262,17 @@ def run_b200(cmd: str) -> None:      # 6,25 $/h, ~360 TFLOPS/$ crête — risque
     _executer(cmd, PEAK_TFLOPS["b200"])
 
 
+@app.function(cpu=8.0, memory=32768, volumes={"/vol": vol}, timeout=24 * 60 * 60)
+def run_cpu(cmd: str) -> None:
+    """Préparation lourde des données sans louer de GPU."""
+    _executer(cmd, 0.0)
+
+
 @app.local_entrypoint()
 def main(cmd: str = BENCH, gpu: str = "a100", spawn: bool = False,
          check_only: bool = False):
-    fns = {"l40s": run_l40s, "a100": run_a100, "h100": run_h100, "b200": run_b200}
+    fns = {"cpu": run_cpu, "l40s": run_l40s, "a100": run_a100,
+           "h100": run_h100, "b200": run_b200}
     # Le préflight tourne sans GPU. Une faute de chemin ou un upload oublié ne
     # consomme donc plus une allocation H100 pour échouer une seconde plus tard.
     preflight.remote(cmd)

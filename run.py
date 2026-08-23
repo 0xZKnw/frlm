@@ -143,6 +143,7 @@ class TrainConfig:
     z_loss: float = 1e-4
     max_steps: int = 20000
     replay_frac: float = 0.0          # part de batchs mid rejoués pendant le SFT
+    mid_curriculum: str = ""          # "v4.3" -> deux bins 80/20 spécialisés
 
     # évaluation / logs
     eval_every: int = 500
@@ -154,6 +155,7 @@ class TrainConfig:
 
     # checkpoints
     ckpt_every_min: float = 5.0
+    save_every_steps: int = 0          # 0 = seulement minuterie/best/fin
     keep_last: int = 3
 
     # système
@@ -239,14 +241,37 @@ class Trainer:
         self.tok = D.load_tokenizer(tok_path)
         self.sp = D.special_ids(self.tok)
 
-        prefix = {"sft": "sft_", "mid": "mid_"}.get(cfg.stage, "")
-        train_bin = data_dir / f"{prefix}train.bin"
-        val_bin = data_dir / f"{prefix}val.bin"
-        if not train_bin.exists():
-            sys.exit(f"[!] {train_bin} introuvable. Lance :  python run.py prepare")
         masked = cfg.stage == "sft"
-        self.train_data = D.BinCorpus(train_bin, cfg.seq_len, with_mask=masked)
-        self.val_data = D.BinCorpus(val_bin, cfg.seq_len, with_mask=masked)
+        self.mid_curriculum: list[tuple[float, str, D.BinCorpus]] = []
+        if cfg.stage == "mid" and cfg.mid_curriculum:
+            recipe = cfg.mid_curriculum.casefold().replace("v", "").replace(".", "")
+            if recipe != "43":
+                sys.exit(f"[!] Curriculum mid inconnu : {cfg.mid_curriculum}")
+            meta_path = data_dir / "meta.json"
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))["midtrain_v43"]
+                for stage_meta in meta["stages"]:
+                    stage_path = data_dir / stage_meta["path"]
+                    corpus = D.BinCorpus(stage_path, cfg.seq_len)
+                    self.mid_curriculum.append((float(stage_meta["end_fraction"]),
+                                                stage_meta["name"], corpus))
+                val_bin = data_dir / meta["validation"]["path"]
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                sys.exit(f"[!] Données du curriculum v4.3 absentes ou incohérentes ({exc}). "
+                         "Lance : python run.py prepare-mid-v43 --data-dir data-v4")
+            self.train_data = self.mid_curriculum[0][2]
+            self.val_data = D.BinCorpus(val_bin, cfg.seq_len)
+            detail = " → ".join(f"{name} jusqu'à {end:.0%}"
+                                for end, name, _ in self.mid_curriculum)
+            print(f"[i] curriculum mid v4.3 actif : {detail}")
+        else:
+            prefix = {"sft": "sft_", "mid": "mid_"}.get(cfg.stage, "")
+            train_bin = data_dir / f"{prefix}train.bin"
+            val_bin = data_dir / f"{prefix}val.bin"
+            if not train_bin.exists():
+                sys.exit(f"[!] {train_bin} introuvable. Lance :  python run.py prepare")
+            self.train_data = D.BinCorpus(train_bin, cfg.seq_len, with_mask=masked)
+            self.val_data = D.BinCorpus(val_bin, cfg.seq_len, with_mask=masked)
         self.val_sources: dict[str, D.BinCorpus] = {}
         self.replay_train = self.replay_val = None
         if masked:
@@ -340,6 +365,16 @@ class Trainer:
             },
             "stage": self.cfg.stage,
         }
+
+    def training_corpus(self, step: int):
+        """Corpus actif du curriculum ; une reprise retombe sur la bonne étape."""
+        if not self.mid_curriculum:
+            return self.train_data
+        fraction = step / max(1, self.cfg.max_steps)
+        for end_fraction, _, corpus in self.mid_curriculum:
+            if fraction < end_fraction:
+                return corpus
+        return self.mid_curriculum[-1][2]
 
     def load_checkpoint(self, spec: str):
         path = self.ckpt.resolve(spec)
@@ -537,7 +572,7 @@ class Trainer:
                         torch.cuda.synchronize(); t0 = time.perf_counter()
                     replay = (self.replay_train is not None
                               and (idx * 9973 + cfg.seed) % 10_000 < round(cfg.replay_frac * 10_000))
-                    corpus = self.replay_train if replay else self.train_data
+                    corpus = self.replay_train if replay else self.training_corpus(self.step)
                     batch_seed = cfg.seed + 101 if replay else cfg.seed
                     x, y, m = corpus.get_batch(idx, cfg.batch_size, batch_seed, self.device)
                     if profile:
@@ -624,8 +659,10 @@ class Trainer:
                                       markup=False, highlight=False)
 
                 # --- checkpoint temporel ------------------------------------------------
-                due = (time.time() - self.last_ckpt_time) >= cfg.ckpt_every_min * 60
-                if due or is_best or self.step >= cfg.max_steps or stop_file.exists():
+                due_time = (time.time() - self.last_ckpt_time) >= cfg.ckpt_every_min * 60
+                due_step = (cfg.save_every_steps > 0
+                            and self.step % cfg.save_every_steps == 0)
+                if due_time or due_step or is_best or self.step >= cfg.max_steps or stop_file.exists():
                     self.ckpt.save(self.state_payload(), self.step, is_best=is_best)
                     self.last_ckpt_time = time.time()
                     tag = " [green](meilleur)[/]" if is_best else ""
@@ -981,6 +1018,10 @@ def add_train_args(p):
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--schedule", default="wsd", choices=["wsd", "cosine"])
     p.add_argument("--warmup", type=int, default=300)
+    p.add_argument("--min-lr-frac", type=float, default=0.02,
+                   help="multiplicateur LR minimal en fin de schedule")
+    p.add_argument("--decay-frac", type=float, default=0.2,
+                   help="fraction finale de décroissance du WSD")
     p.add_argument("--z-loss", type=float, default=1e-4)
     p.add_argument("--replay-frac", type=float, default=0.0,
                    help="fraction de batchs mid rejoués pendant le SFT (anti-oubli)")
@@ -988,7 +1029,11 @@ def add_train_args(p):
     p.add_argument("--eval-iters", type=int, default=40)
     p.add_argument("--sample-every", type=int, default=1000)
     p.add_argument("--ckpt-every-min", type=float, default=5.0)
+    p.add_argument("--save-every", type=int, default=0,
+                   help="checkpoint roulant tous les N steps (0 = désactivé)")
     p.add_argument("--keep-last", type=int, default=3)
+    p.add_argument("--mid-curriculum", default="",
+                   help="pour la phase mid : v4.3 active les bins curriculum 80/20")
     p.add_argument("--no-compile", dest="compile", action="store_false",
                    help="désactive torch.compile (actif par défaut : +94%% de débit ; "
                         "retombe tout seul en mode non compilé si triton manque)")
@@ -1019,10 +1064,12 @@ def cfg_from_args(args, stage: str) -> TrainConfig:
         preset=args.preset, hybrid=args.hybrid, batch_size=args.batch_size, grad_accum=args.grad_accum,
         seq_len=args.seq_len, optimizer=args.optimizer, lr=lr, adam_lr=args.adam_lr,
         weight_decay=args.weight_decay, grad_clip=args.grad_clip, schedule=args.schedule,
-        warmup=args.warmup, z_loss=args.z_loss, max_steps=args.max_steps,
-        replay_frac=args.replay_frac,
+        warmup=args.warmup, min_lr_frac=args.min_lr_frac, decay_frac=args.decay_frac,
+        z_loss=args.z_loss, max_steps=args.max_steps,
+        replay_frac=args.replay_frac, mid_curriculum=args.mid_curriculum,
         eval_every=args.eval_every, eval_iters=args.eval_iters, sample_every=args.sample_every,
-        ckpt_every_min=args.ckpt_every_min, keep_last=args.keep_last, compile=args.compile,
+        ckpt_every_min=args.ckpt_every_min, save_every_steps=args.save_every,
+        keep_last=args.keep_last, compile=args.compile,
         dtype=args.dtype, seed=args.seed, gpu_peak_tflops=args.gpu_peak_tflops,
     )
 
@@ -1050,6 +1097,15 @@ def main():
                         "(après un changement de recette : distill, sur-échantillonnage…)")
     p.add_argument("--sft-only", action="store_true",
                    help="avec --rebin, reconstruit seulement le SFT et préserve les bins mid")
+
+    p = sub.add_parser("prepare-mid-v43",
+                       help="construit le curriculum mid v4.3 sans toucher au tokenizer/pretrain")
+    p.add_argument("--data-dir", default="data-v4")
+    p.add_argument("--target-tokens", type=float, default=1.5e9,
+                   help="budget traité maximal de la phase (plafond 1,5 milliard)")
+    p.add_argument("--seed", type=int, default=1337)
+    p.add_argument("--skip-download", action="store_true",
+                   help="réutilise les JSONL locaux et les sources QA déjà filtrées")
 
     p = sub.add_parser("train", help="pré-entraînement")
     add_train_args(p)
@@ -1148,7 +1204,17 @@ def main():
 
     args = ap.parse_args()
 
-    if args.cmd == "prepare" and args.rebin:
+    if args.cmd == "prepare-mid-v43":
+        from frlm.mid_v43 import prepare as prepare_mid_v43
+
+        rep = prepare_mid_v43(Path(args.data_dir), target_tokens=int(args.target_tokens),
+                              seed=args.seed, skip_download=args.skip_download)
+        print("\n=== Mid v4.3 prêt ===")
+        print(json.dumps(rep, indent=2, ensure_ascii=False))
+        print("\nÉtape suivante : python run.py mid --mid-curriculum v4.3 "
+              "--max-steps 11444 --batch-size 16 --grad-accum 4 --seq-len 2048")
+
+    elif args.cmd == "prepare" and args.rebin:
         rep = D.rebin_mid_sft(Path(args.data_dir), mid_frac=args.mid_frac,
                               max_seq_len=args.seq_len,
                               sft_target_supervised=int(args.sft_target_supervised),

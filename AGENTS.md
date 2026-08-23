@@ -96,6 +96,18 @@ conversations. Le trainer rejoue 15 % du corpus mid et choisit le meilleur check
 sur une validation macro par source. Utiliser un nouveau nom de run et reprendre
 explicitement `runs/fr-v4-v41/mid/ckpt_best.pt` ; ne pas relancer le mid.
 
+Pour le mid v4.3 à budget maximal de 1,5 milliard de tokens :
+
+```powershell
+python run.py prepare-mid-v43 --data-dir data-v4 --target-tokens 1.5e9
+python run.py mid --data-dir data-v4 --run fr-v4-v43 --preset v4-base --mid-curriculum v4.3 --seq-len 2048 --batch-size 16 --grad-accum 4 --max-steps 11444 --optimizer muon --lr 0.002 --adam-lr 0.0001 --schedule wsd --warmup 100 --decay-frac 0.10 --min-lr-frac 0.02 --eval-every 1000 --sample-every 1000 --save-every 1000 --ckpt-every-min 10000 --keep-last 12 --resume runs/fr-v4/pretrain/ckpt_latest.pt
+```
+
+Cette recette conserve le tokenizer/pré-entraînement v4, utilise deux bins 80/20,
+exclut explicitement les prompts/seeds OOD et inscrit les licences/provenances dans
+`meta.json`. Elle inclut CQuAE sous CC-BY-NC-4.0 : ne pas présenter le modèle dérivé
+comme commercial ni publier les corpus bruts sans revue de licence.
+
 Benchmarks :
 
 ```powershell

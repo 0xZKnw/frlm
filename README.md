@@ -139,6 +139,36 @@ modal run --detach modal_app.py --gpu h100 --spawn --cmd \
 Only upload the tokenizer, `sft_train.bin`/mask, the global and per-source SFT
 validation files, and `meta.json`. Raw JSONL files remain local and untracked.
 
+### v4.3 1.5B-token curriculum midtrain
+
+The v4.3 midtrain keeps the original v4 tokenizer and pretrain weights. It builds
+an exact 1.5B-token, two-stage curriculum: 80% broad educational/natural French,
+then 20% late reasoning upsampling. The aggregate mixture is 57.9% natural French
+(FineWeb2-HQ, Wikipedia, books, theses, oral transcripts and Europarl), 35.6%
+Python-verified exercises, 1.5% grounded FrenchQA/PIAF/CQuAE and 5% clean
+instructions. No benchmark prompt or reserved OOD seed is read by the builder.
+
+CQuAE is CC-BY-NC-4.0, so this recipe is suitable for the private student run
+described here but must be reviewed before any commercial redistribution. Source
+provenance and repetition counts are recorded in `meta.json`.
+
+```bash
+# CPU Modal : télécharge, filtre et tokenise sans louer de GPU.
+modal run --detach modal_app.py --gpu cpu --cmd \
+  "python run.py prepare-mid-v43 --data-dir data-v4 --target-tokens 1.5e9"
+
+# Préflight seul, puis lancement H100 détaché.
+modal run modal_app.py --check-only --gpu h100 --cmd \
+  "python run.py mid --data-dir data-v4 --run fr-v4-v43 --preset v4-base --mid-curriculum v4.3 --seq-len 2048 --batch-size 16 --grad-accum 4 --max-steps 11444 --optimizer muon --lr 0.002 --adam-lr 0.0001 --schedule wsd --warmup 100 --decay-frac 0.10 --min-lr-frac 0.02 --eval-every 1000 --sample-every 1000 --save-every 1000 --ckpt-every-min 10000 --keep-last 12 --resume /vol/runs/fr-v4/pretrain/ckpt_latest.pt"
+
+modal run --detach modal_app.py --gpu h100 --spawn --cmd \
+  "python run.py mid --data-dir data-v4 --run fr-v4-v43 --preset v4-base --mid-curriculum v4.3 --seq-len 2048 --batch-size 16 --grad-accum 4 --max-steps 11444 --optimizer muon --lr 0.002 --adam-lr 0.0001 --schedule wsd --warmup 100 --decay-frac 0.10 --min-lr-frac 0.02 --eval-every 1000 --sample-every 1000 --save-every 1000 --ckpt-every-min 10000 --keep-last 12 --resume /vol/runs/fr-v4/pretrain/ckpt_latest.pt"
+```
+
+At 131,072 tokens/step, 11,444 steps process 1,499,987,968 tokens, staying
+12,032 tokens below the hard budget. Evaluation and rolling checkpoints happen
+every 1,000 steps; `ckpt_best.pt` and the final checkpoint are also preserved.
+
 ---
 
 ## Results
