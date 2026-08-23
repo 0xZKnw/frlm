@@ -4,9 +4,11 @@ import json
 import random
 import tempfile
 import unittest
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+import torch
 
 from frlm.dpo_v45 import _load_pairs
 from frlm.rlaif_offline_v45 import _read_prompts, import_scores
@@ -189,6 +191,81 @@ class TaskTests(unittest.TestCase):
         self.assertGreater(trainer.frontier_scales["frontier"], 1.0)
         self.assertFalse(trainer.frontier_history["frontier"])
 
+    def test_replay_retention_est_equilibre_par_capacite(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.cfg = RLVRConfig()
+        trainer.replay_index = 0
+        tasks = [trainer._next_retention_task() for _ in range(12)]
+        self.assertEqual(Counter(task.capability for task in tasks),
+                         {capability: 2 for capability in SCHEMAS_BY_CAPABILITY})
+        self.assertNotEqual(tasks[0].schema_id, tasks[6].schema_id)
+
+    def test_controle_kl_reduit_le_lr_apres_trois_excursions(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.cfg = RLVRConfig(kl_excursion_patience=3)
+        trainer.kl_beta = 0.10
+        trainer.lr_scale = 1.0
+        trainer.kl_excursions = 0
+        self.assertFalse(trainer._register_kl(0.06))
+        self.assertFalse(trainer._register_kl(0.07))
+        self.assertTrue(trainer._register_kl(0.08))
+        self.assertEqual(trainer.lr_scale, 0.5)
+        self.assertEqual(trainer.kl_excursions, 0)
+        self.assertGreater(trainer.kl_beta, 0.10)
+
+    def test_snapshot_transactionnel_restaure_modele_et_adam(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.model = torch.nn.Linear(2, 1)
+        trainer.optimizer = torch.optim.AdamW(trainer.model.parameters(), lr=0.01)
+        x = torch.tensor([[1.0, -2.0]])
+        trainer.model(x).sum().backward()
+        trainer.optimizer.step()
+        trainer.optimizer.zero_grad(set_to_none=True)
+        snapshot = trainer._snapshot_train_state()
+        trainer.model(x).square().sum().backward()
+        trainer.optimizer.step()
+        trainer._restore_train_state(snapshot)
+        for key, value in trainer.model.state_dict().items():
+            self.assertTrue(torch.equal(value.cpu(), snapshot["model"][key]))
+        restored = trainer.optimizer.state_dict()
+        for parameter, state in snapshot["optimizer"]["state"].items():
+            for key, value in state.items():
+                current = restored["state"][parameter][key]
+                if torch.is_tensor(value):
+                    self.assertTrue(torch.equal(current.cpu(), value))
+                else:
+                    self.assertEqual(current, value)
+        self.assertEqual(restored["param_groups"], snapshot["optimizer"]["param_groups"])
+
+    def test_mesure_kl_post_step_exerce_la_zone_transactionnelle(self):
+        class TinyLM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embedding = torch.nn.Embedding(8, 4)
+                self.head = torch.nn.Linear(4, 8)
+
+            def forward(self, tokens, diagnostics=False):
+                return self.head(self.embedding(tokens)), None, None
+
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.model = TinyLM()
+        trainer.ref = TinyLM()
+        trainer.ref.load_state_dict(trainer.model.state_dict())
+        trainer.device = "cpu"
+        trainer.use_cuda = False
+        x = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+        mask = torch.ones((1, 3), dtype=torch.bool)
+        batches = [(x, mask, torch.ones(1))]
+        self.assertAlmostEqual(trainer._measure_kl(batches, 3), 0.0, places=7)
+
+    def test_gate_dev_tolere_trois_points_et_refuse_quatre(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.cfg = RLVRConfig(max_dev_drop=0.05)
+        trainer.best_score = 33 / 60
+        self.assertFalse(trainer._dev_regression(31 / 60))
+        self.assertFalse(trainer._dev_regression(30 / 60))
+        self.assertTrue(trainer._dev_regression(29 / 60))
+
     def test_reprise_checkpoint_pilote_sans_etat_frontiere(self):
         trainer = RLVRTrainer.__new__(RLVRTrainer)
         trainer.cfg = RLVRConfig()
@@ -217,6 +294,38 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(trainer.frontier_scales, {"frontier": 1.0})
         self.assertEqual(trainer.difficulty, {"reasoning_program": 0.25})
         self.assertTrue(trainer._resume_revalidate)
+
+    def test_reprise_stabilisee_reinitialise_adam_et_controle_kl(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.cfg = RLVRConfig(reset_optimizer_on_resume=True, kl_beta=0.2)
+        trainer.run_dir = Path("unused")
+        trainer.stage_dir = trainer.run_dir / "rlvr-v45"
+        trainer.metrics_path = trainer.stage_dir / "metrics.jsonl"
+        trainer.profile_sha256 = "profile"
+        trainer.model, trainer.optimizer = Mock(), Mock()
+        trainer.use_cuda = False
+        trainer.rng = random.Random(1)
+        trainer.difficulty = {"reasoning_program": 0.25}
+        trainer.frontier_scales = {"frontier": 1.0}
+        trainer.frontier_history = {"frontier": deque(maxlen=24)}
+        trainer.cap_history = {"reasoning_program": deque(maxlen=40)}
+        checkpoint = {
+            "stage": "rlvr-v45", "profile_sha256": "profile", "model": {},
+            "optimizers": [{"old": True}], "accepted_updates": 60,
+            "rollout_index": 400, "tokens_generated": 60_000,
+            "kl_beta": 0.9, "lr_scale": 0.25, "best_score": 0.55,
+            "baseline_score": 0.067, "difficulty": {}, "rng": {},
+            "verifier_version": VERIFIER_VERSION,
+        }
+        with patch("frlm.rl_v45.resolve_checkpoint", return_value=Path("best.pt")), \
+                patch("frlm.rl_v45.torch.load", return_value=checkpoint), \
+                patch("builtins.print"):
+            trainer._resume("best")
+        trainer.optimizer.load_state_dict.assert_not_called()
+        self.assertEqual(trainer.update, 60)
+        self.assertEqual(trainer.optimizer_start_update, 60)
+        self.assertEqual(trainer.kl_beta, 0.2)
+        self.assertEqual(trainer.lr_scale, 1.0)
 
     def test_reprise_recalcule_un_meilleur_score_de_verificateur_obsolete(self):
         with tempfile.TemporaryDirectory() as directory:

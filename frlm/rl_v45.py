@@ -16,6 +16,7 @@ import random
 import re
 import signal
 import time
+from copy import deepcopy
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -50,11 +51,16 @@ class RLVRConfig:
     group_size: int = 6
     max_new_tokens: int = 112
     micro_bs: int = 2
-    lr: float = 2e-6
+    lr: float = 5e-7
     warmup: int = 5
-    kl_beta: float = 0.018
+    kl_beta: float = 0.10
     kl_target: float = 0.012
-    replay_weight: float = 0.05
+    kl_beta_max: float = 1.0
+    kl_soft_max: float = 0.05
+    kl_hard_max: float = 0.12
+    kl_excursion_patience: int = 3
+    min_lr_scale: float = 0.125
+    replay_weight: float = 0.15
     grad_clip: float = 1.0
     oversample: float = 4.0
     eval_every: int = 10
@@ -62,9 +68,12 @@ class RLVRConfig:
     save_every: int = 10
     keep_last: int = 2
     max_empty_batches: int = 20
+    max_kl_rejections: int = 12
+    max_dev_drop: float = 0.05
     seed: int = 455_100
     device: str = "cuda"
     require_profile: bool = True
+    reset_optimizer_on_resume: bool = False
 
 
 _CURATED_REPLAY = (
@@ -81,6 +90,19 @@ _CURATED_REPLAY = (
     ("Résume : le train part à huit heures et arrive à dix heures.",
      "Le trajet en train dure de huit heures à dix heures."),
 )
+
+
+def _clone_to_cpu(value):
+    """Clone récursivement un état PyTorch sans conserver de stockage CUDA partagé."""
+    if torch.is_tensor(value):
+        return value.detach().to(device="cpu", copy=True)
+    if isinstance(value, dict):
+        return {key: _clone_to_cpu(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clone_to_cpu(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_to_cpu(item) for item in value)
+    return deepcopy(value)
 
 
 def _atomic_torch_save(payload: dict, path: Path):
@@ -128,6 +150,10 @@ class RLVRTrainer:
             raise ValueError("group_size >= 2 et prompts_per_update >= 1 requis")
         if cfg.micro_bs > 2:
             raise ValueError("micro_bs > 2 est refusé par le profil mémoire RTX 4060")
+        if not (0 < cfg.kl_target < cfg.kl_soft_max < cfg.kl_hard_max):
+            raise ValueError("il faut kl_target < kl_soft_max < kl_hard_max")
+        if cfg.kl_excursion_patience < 1 or cfg.max_kl_rejections < 1:
+            raise ValueError("les patiences KL doivent être positives")
         if cfg.device.startswith("cuda") and not torch.cuda.is_available():
             raise RuntimeError("CUDA demandé mais indisponible")
         self.device = cfg.device
@@ -175,6 +201,10 @@ class RLVRTrainer:
         self.rollout_index = 0
         self.tokens_generated = 0
         self.kl_beta = cfg.kl_beta
+        self.lr_scale = 1.0
+        self.kl_excursions = 0
+        self.optimizer_start_update = 0
+        self.replay_index = 0
         self.best_score = -1.0
         self.baseline_score = None
         self._resume_revalidate = False
@@ -263,6 +293,9 @@ class RLVRTrainer:
             "accepted_updates": self.update, "rollout_index": self.rollout_index,
             "tokens_seen": self.init_meta.get("tokens_seen", 0) + self.tokens_generated,
             "tokens_generated": self.tokens_generated, "kl_beta": self.kl_beta,
+            "lr_scale": self.lr_scale, "kl_excursions": self.kl_excursions,
+            "optimizer_start_update": self.optimizer_start_update,
+            "replay_index": self.replay_index,
             "best_score": self.best_score, "baseline_score": self.baseline_score,
             "difficulty": self.difficulty, "profile_sha256": self.profile_sha256,
             "verifier_version": VERIFIER_VERSION,
@@ -294,11 +327,22 @@ class RLVRTrainer:
         if checkpoint.get("profile_sha256") not in (None, self.profile_sha256):
             raise ValueError("le profil pass@k a changé depuis ce checkpoint RLVR")
         self.model.load_state_dict(checkpoint["model"])
-        self.optimizer.load_state_dict(checkpoint["optimizers"][0])
         self.update = int(checkpoint["accepted_updates"])
+        if self.cfg.reset_optimizer_on_resume:
+            self.optimizer_start_update = self.update
+            print("[i] AdamW réinitialisé pour la branche stabilisée.")
+        else:
+            self.optimizer.load_state_dict(checkpoint["optimizers"][0])
+            self.optimizer_start_update = int(checkpoint.get("optimizer_start_update", 0))
         self.rollout_index = int(checkpoint.get("rollout_index", 0))
         self.tokens_generated = int(checkpoint.get("tokens_generated", 0))
-        self.kl_beta = float(checkpoint.get("kl_beta", self.cfg.kl_beta))
+        self.kl_beta = (self.cfg.kl_beta if self.cfg.reset_optimizer_on_resume
+                        else float(checkpoint.get("kl_beta", self.cfg.kl_beta)))
+        self.lr_scale = (1.0 if self.cfg.reset_optimizer_on_resume
+                         else float(checkpoint.get("lr_scale", 1.0)))
+        self.kl_excursions = (0 if self.cfg.reset_optimizer_on_resume
+                              else int(checkpoint.get("kl_excursions", 0)))
+        self.replay_index = int(checkpoint.get("replay_index", 0))
         self.best_score = float(checkpoint.get("best_score", -1.0))
         self.baseline_score = checkpoint.get("baseline_score")
         self._resume_revalidate = checkpoint.get("verifier_version") != VERIFIER_VERSION
@@ -459,6 +503,74 @@ class RLVRTrainer:
             self.frontier_scales[key] = 0.5 * self.frontier_scales[key] + 0.5 * desired
             history.clear()
 
+    def _snapshot_control_state(self) -> dict:
+        return {
+            "difficulty": dict(self.difficulty),
+            "cap_history": {key: list(history) for key, history in self.cap_history.items()},
+            "frontier_scales": dict(self.frontier_scales),
+            "frontier_history": {key: list(history)
+                                 for key, history in self.frontier_history.items()},
+            "kl_beta": self.kl_beta, "lr_scale": self.lr_scale,
+            "kl_excursions": self.kl_excursions, "replay_index": self.replay_index,
+        }
+
+    def _restore_control_state(self, state: dict):
+        self.difficulty = dict(state["difficulty"])
+        self.frontier_scales = dict(state["frontier_scales"])
+        for key, values in state["cap_history"].items():
+            self.cap_history[key].clear()
+            self.cap_history[key].extend(values)
+        for key, values in state["frontier_history"].items():
+            self.frontier_history[key].clear()
+            self.frontier_history[key].extend(values)
+        self.kl_beta = float(state["kl_beta"])
+        self.lr_scale = float(state["lr_scale"])
+        self.kl_excursions = int(state["kl_excursions"])
+        self.replay_index = int(state["replay_index"])
+
+    def _snapshot_train_state(self) -> dict:
+        """Snapshot CPU exact, réservé aux updates dans la zone KL d'alerte."""
+        return {
+            "model": _clone_to_cpu(self.model.state_dict()),
+            "optimizer": _clone_to_cpu(self.optimizer.state_dict()),
+        }
+
+    def _restore_train_state(self, state: dict):
+        self.model.load_state_dict(state["model"])
+        self.optimizer.load_state_dict(state["optimizer"])
+        self.optimizer.zero_grad(set_to_none=True)
+
+    def _register_kl(self, kl: float) -> bool:
+        """Adapte beta et LR ; renvoie True lorsqu'une baisse de LR a eu lieu."""
+        excursion = not math.isfinite(kl) or kl > self.cfg.kl_soft_max
+        if excursion:
+            self.kl_excursions += 1
+            self.kl_beta = min(self.cfg.kl_beta_max, self.kl_beta * 1.5)
+        else:
+            self.kl_excursions = max(0, self.kl_excursions - 1)
+            if kl < self.cfg.kl_target / 1.5:
+                self.kl_beta = max(0.002, self.kl_beta / 1.1)
+        if self.kl_excursions < self.cfg.kl_excursion_patience:
+            return False
+        previous = self.lr_scale
+        self.lr_scale = max(self.cfg.min_lr_scale, self.lr_scale * 0.5)
+        self.kl_excursions = 0
+        return self.lr_scale < previous
+
+    def _dev_regression(self, macro: float) -> bool:
+        return self.best_score - macro > self.cfg.max_dev_drop + 1e-12
+
+    def _next_retention_task(self) -> TaskSpec:
+        """Replay équilibré par capacité, puis cyclique par schéma."""
+        capabilities = tuple(SCHEMAS_BY_CAPABILITY)
+        slot = self.replay_index
+        capability = capabilities[slot % len(capabilities)]
+        schemas = SCHEMAS_BY_CAPABILITY[capability]
+        schema = schemas[(slot // len(capabilities)) % len(schemas)]
+        seed = self.cfg.seed + 10_000_000 + slot * 37
+        self.replay_index += 1
+        return make_task(seed, "train", 0.35, capability, schema)
+
     def _make_microbatches(self, groups):
         rows = []
         for _task, prompt_ids, samples, advantages in groups:
@@ -480,18 +592,15 @@ class RLVRTrainer:
 
     def _replay_batch(self):
         batch = []
+        retention_rows = max(1, self.cfg.micro_bs // 2)
         for index in range(self.cfg.micro_bs):
-            if not self.bridge_specs or self.rng.random() >= 0.70:
+            if index >= retention_rows:
                 question, answer = self.rng.choice(_CURATED_REPLAY)
                 prompt = D.render_chat([{"role": "user", "text": question}]) + f"{D.IM_START}assistant\n"
                 completion = f"{D.THINK}\n\n{D.THINK_END}\n{answer}{D.IM_END}\n"
             else:
-                spec = self.rng.choice(self.bridge_specs)
-                capability = spec["capability"]
-                task = make_task(self.cfg.seed + 9_000_000 + self.rollout_index + index,
-                                 "train", min(0.45, float(spec["difficulty"])), capability,
-                                 spec["schema_id"])
-                prompt_ids, prefill = self.engine.prompt(task)
+                task = self._next_retention_task()
+                prompt_ids, _prefill = self.engine.prompt(task)
                 prompt = None
                 completion = _canonical_answer(task) + f"{D.IM_END}\n"
                 if task.requires_trace:
@@ -510,10 +619,35 @@ class RLVRTrainer:
             y[row, prompt_len - 1:len(sequence) - 1] = values[prompt_len:]
         return x, y
 
+    @torch.inference_mode()
+    def _measure_kl(self, batches, constant_denominator: int) -> float:
+        self.model.eval()
+        total = 0.0
+        for x_cpu, mask_cpu, _adv_cpu in batches:
+            x = x_cpu.to(self.device, non_blocking=self.use_cuda)
+            mask = mask_cpu.to(self.device, non_blocking=self.use_cuda)
+            targets = x[:, 1:]
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.use_cuda):
+                logits, _, _ = self.model(x, diagnostics=False)
+                ref_logits, _, _ = self.ref(x, diagnostics=False)
+            vocab = logits.shape[-1]
+            logp = -F.cross_entropy(logits[:, :-1].reshape(-1, vocab).float(),
+                                    targets.reshape(-1), reduction="none").view_as(targets)
+            ref_logp = -F.cross_entropy(ref_logits[:, :-1].reshape(-1, vocab).float(),
+                                        targets.reshape(-1), reduction="none").view_as(targets)
+            difference = ref_logp - logp
+            kl_tokens = difference.exp() - difference - 1.0
+            total += float(kl_tokens[mask].sum() / constant_denominator)
+            del x, mask, targets, logits, ref_logits, logp, ref_logp
+            del difference, kl_tokens
+        return total
+
     def _train_update(self, groups) -> dict:
         batches, constant_denominator = self._make_microbatches(groups)
         self.model.train()
-        lr = self.cfg.lr * min(1.0, (self.update + 1) / max(1, self.cfg.warmup))
+        warm_step = self.update - self.optimizer_start_update + 1
+        lr = (self.cfg.lr * self.lr_scale
+              * min(1.0, warm_step / max(1, self.cfg.warmup)))
         for group in self.optimizer.param_groups:
             group["lr"] = lr
         self.optimizer.zero_grad(set_to_none=True)
@@ -541,7 +675,26 @@ class RLVRTrainer:
             pg_total += float(pg.detach())
             kl_total += float(kl.detach())
             token_count += float(mask.sum())
-            del x, mask, targets, logits, ref_logits, logp, ref_logp, kl_tokens
+            del x, mask, advantages, targets, logits, ref_logits, logp, ref_logp
+            del difference, kl_tokens, pg, kl
+
+        common = {"pg": pg_total, "kl": kl_total, "post_kl": None,
+                  "replay": 0.0, "grad_norm": 0.0, "lr": lr,
+                  "tokens": token_count}
+        if not math.isfinite(kl_total) or kl_total > self.cfg.kl_hard_max:
+            self.optimizer.zero_grad(set_to_none=True)
+            return {**common, "accepted": False, "reject_reason": "kl_pre_hard"}
+
+        transaction = None
+        if kl_total > self.cfg.kl_soft_max:
+            try:
+                transaction = self._snapshot_train_state()
+            except (MemoryError, RuntimeError):
+                self.optimizer.zero_grad(set_to_none=True)
+                gc.collect()
+                return {**common, "accepted": False,
+                        "reject_reason": "transaction_snapshot_failed"}
+
         replay_x, replay_y = self._replay_batch()
         replay_x = replay_x.to(self.device, non_blocking=self.use_cuda)
         replay_y = replay_y.to(self.device, non_blocking=self.use_cuda)
@@ -550,14 +703,35 @@ class RLVRTrainer:
                 replay_x, targets=replay_y, diagnostics=False, loss_reduction="mean"
             )
         (self.cfg.replay_weight * replay_loss).backward()
-        grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip))
+        grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(),
+                                                         self.cfg.grad_clip))
+        if not math.isfinite(float(replay_loss.detach())) or not math.isfinite(grad_norm):
+            self.optimizer.zero_grad(set_to_none=True)
+            del replay_x, replay_y, _logits, replay_loss
+            if transaction is not None:
+                del transaction
+            gc.collect()
+            return {**common, "post_kl": float("nan"),
+                    "grad_norm": grad_norm, "accepted": False,
+                    "reject_reason": "nonfinite_replay_or_grad"}
         self.optimizer.step()
-        if kl_total > self.cfg.kl_target * 1.5:
-            self.kl_beta = min(0.10, self.kl_beta * 1.2)
-        elif kl_total < self.cfg.kl_target / 1.5:
-            self.kl_beta = max(0.002, self.kl_beta / 1.2)
-        return {"pg": pg_total, "kl": kl_total, "replay": float(replay_loss.detach()),
-                "grad_norm": grad_norm, "lr": lr, "tokens": token_count}
+        replay_value = float(replay_loss.detach())
+        del replay_x, replay_y, _logits, replay_loss
+        post_kl = None
+        if transaction is not None:
+            post_kl = self._measure_kl(batches, constant_denominator)
+            if not math.isfinite(post_kl) or post_kl > self.cfg.kl_hard_max:
+                self._restore_train_state(transaction)
+                del transaction
+                gc.collect()
+                return {**common, "post_kl": post_kl,
+                        "replay": replay_value,
+                        "grad_norm": grad_norm, "accepted": False,
+                        "reject_reason": "kl_post_hard"}
+            del transaction
+            gc.collect()
+        return {**common, "post_kl": post_kl, "replay": replay_value,
+                "grad_norm": grad_norm, "accepted": True, "reject_reason": None}
 
     @torch.inference_mode()
     def _evaluate(self) -> dict:
@@ -626,10 +800,14 @@ class RLVRTrainer:
         signal.signal(signal.SIGINT, stop)
         stop_file = self.run_dir / "STOP"
         empty_batches = 0
+        rejected_kl_streak = 0
+        rejections_path = self.stage_dir / "rejected_updates.jsonl"
         while self.update < self.cfg.accepted_updates and not self.stop_requested:
             started = time.time()
+            control_state = self._snapshot_control_state()
             groups, rollout = self._rollouts()
             if len(groups) < self.cfg.prompts_per_update:
+                self._restore_control_state(control_state)
                 empty_batches += 1
                 print(f"[!] Lot incomplet : {len(groups)}/{self.cfg.prompts_per_update} "
                       f"groupes dynamiques sur {int(rollout['attempts'])} tirages; nouvel essai.")
@@ -641,8 +819,35 @@ class RLVRTrainer:
                 continue
             empty_batches = 0
             train_stats = self._train_update(groups)
-            self.update += 1
             self.tokens_generated += int(rollout["tokens"])
+            if not train_stats["accepted"]:
+                self._restore_control_state(control_state)
+                observed_kl = train_stats["post_kl"]
+                if observed_kl is None or not math.isfinite(observed_kl):
+                    observed_kl = train_stats["kl"]
+                lr_reduced = self._register_kl(float(observed_kl))
+                rejected_kl_streak += 1
+                rejection = {
+                    "after_update": self.update, "rollout_index": self.rollout_index,
+                    "reason": train_stats["reject_reason"],
+                    "kl": train_stats["kl"], "post_kl": train_stats["post_kl"],
+                    "kl_beta": self.kl_beta, "lr_scale": self.lr_scale,
+                    "lr_reduced": lr_reduced, "elapsed_s": time.time() - started,
+                }
+                with rejections_path.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(rejection, ensure_ascii=False) + "\n")
+                print(f"[!] Update {self.update + 1} rejetée ({train_stats['reject_reason']}) · "
+                      f"KL {train_stats['kl']:.4f} · post "
+                      f"{train_stats['post_kl'] if train_stats['post_kl'] is not None else '-'} · "
+                      f"beta {self.kl_beta:.3f} · lr×{self.lr_scale:.3f}")
+                if rejected_kl_streak >= self.cfg.max_kl_rejections:
+                    print("[!] Trop de rejets KL consécutifs : arrêt propre sur le dernier état accepté.")
+                    self.stop_requested = True
+                continue
+            rejected_kl_streak = 0
+            observed_kl = max(train_stats["kl"], train_stats["post_kl"] or 0.0)
+            lr_reduced = self._register_kl(observed_kl)
+            self.update += 1
             success_rate = rollout["successes"] / max(1, rollout["samples"])
             record = {
                 "update": self.update, "rollout_index": self.rollout_index,
@@ -651,19 +856,25 @@ class RLVRTrainer:
                 "mean_entropy": rollout["entropy"] / max(1, rollout["samples"]),
                 "mean_length": rollout["tokens"] / max(1, rollout["samples"]),
                 "tokens_generated": self.tokens_generated, "kl_beta": self.kl_beta,
+                "lr_scale": self.lr_scale, "lr_reduced": lr_reduced,
                 "difficulty": dict(self.difficulty),
                 "frontier_scales": dict(self.frontier_scales),
                 "elapsed_s": time.time() - started,
                 **train_stats,
             }
             is_best = False
+            stop_reason = None
             if self.update % self.cfg.eval_every == 0 or self.update == self.cfg.accepted_updates:
                 evaluation = self._evaluate()
                 record["eval"] = evaluation
-                safe_kl = train_stats["kl"] <= max(0.05, self.cfg.kl_target * 3)
+                safe_kl = train_stats["kl"] <= self.cfg.kl_soft_max
                 if evaluation["macro"] > self.best_score and safe_kl:
                     self.best_score = evaluation["macro"]
                     is_best = True
+                elif self._dev_regression(evaluation["macro"]):
+                    stop_reason = "dev_regression"
+                    self.stop_requested = True
+                    record["stop_reason"] = stop_reason
                 (self.stage_dir / f"eval_{self.update:06d}.json").write_text(
                     json.dumps(evaluation, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
@@ -672,7 +883,11 @@ class RLVRTrainer:
             print(f"update {self.update:3d}/{self.cfg.accepted_updates} · "
                   f"ok {100*success_rate:4.1f}% · groupes {len(groups)}/{int(rollout['attempts'])} · "
                   f"KL {train_stats['kl']:.4f} · replay {train_stats['replay']:.3f} · "
+                  f"lr×{self.lr_scale:.3f} · "
                   f"{time.time()-started:.1f}s")
+            if stop_reason == "dev_regression":
+                print(f"[!] Régression dev : {evaluation['macro']:.3f} contre best "
+                      f"{self.best_score:.3f}. Arrêt propre ; ckpt_best est conservé.")
             if is_best or self.update % self.cfg.save_every == 0 or stop_file.exists():
                 self._save(best=is_best)
             if stop_file.exists():
@@ -690,9 +905,15 @@ def cmd_rl_v45(args):
         accepted_updates=args.updates, prompts_per_update=args.prompts,
         group_size=args.group, max_new_tokens=args.max_new, micro_bs=args.micro_bs,
         lr=args.lr, kl_beta=args.kl_beta, kl_target=args.kl_target,
+        kl_beta_max=args.kl_beta_max, kl_soft_max=args.kl_soft_max,
+        kl_hard_max=args.kl_hard_max,
+        kl_excursion_patience=args.kl_excursion_patience,
+        min_lr_scale=args.min_lr_scale,
         replay_weight=args.replay_weight, oversample=args.oversample,
         eval_every=args.eval_every, eval_tasks=args.eval_tasks,
-        save_every=args.save_every, seed=args.seed, device=args.device,
+        save_every=args.save_every, max_kl_rejections=args.max_kl_rejections,
+        max_dev_drop=args.max_dev_drop, seed=args.seed, device=args.device,
         require_profile=not args.allow_no_profile,
+        reset_optimizer_on_resume=args.reset_optimizer,
     )
     RLVRTrainer(cfg, resume=args.resume).train()

@@ -159,7 +159,7 @@ pré-entraînement neuf. Le pipeline corrigé ne remplace pas les anciens `rl.py
 python run.py rl-profile-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage sft --init-ckpt best --tasks 60 --k 6 --frontier-k 32 --max-new 112 --output profile.json
 python run.py rl-profile-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage sft --init-ckpt best --tasks 60 --k 6 --frontier-k 32 --max-new 112 --refine-from profile.json --output profile.json
 python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage sft --init-ckpt best --ref-stage sft --ref-ckpt best --updates 10 --prompts 3 --group 6 --max-new 112 --micro-bs 2 --lr 2e-6 --kl-beta 0.018 --kl-target 0.012 --replay-weight 0.05 --eval-tasks 60
-python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 --updates 200 --resume latest
+python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 --updates 200 --resume best --reset-optimizer --lr 5e-7 --kl-beta 0.10 --kl-beta-max 1.0 --kl-target 0.012 --kl-soft-max 0.05 --kl-hard-max 0.12 --replay-weight 0.15 --max-dev-drop 0.05
 python run.py rlaif-build-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage rlvr-v45 --init-ckpt best --prompts 40 --candidates 6
 python run.py rlaif-import-v45 --run fr-v4-v45-sft --scores runs/fr-v4-v45-sft/rlaif-v45/scores_a.jsonl --scores-reverse runs/fr-v4-v45-sft/rlaif-v45/scores_b.jsonl
 python run.py dpo-v45 --run fr-v4-v45-sft --data-dir data-v4 --init-stage rlvr-v45 --init-ckpt best --ref-stage rlvr-v45 --ref-ckpt best --epochs 1 --grad-accum 8 --lr 5e-7 --beta 0.10
@@ -171,13 +171,26 @@ profils sans refaire leurs premiers rollouts. Le trainer retient un groupe
 uniquement si son nombre de réussites primaires est strictement entre 0 et G ; il
 centre les avantages sans division par l'écart-type, impose T=1/top-p=1 et un seul
 epoch on-policy. Une update acceptée contient exactement trois groupes dynamiques et
-la sélection du checkpoint utilise les 60 tâches dev. Les groupes sans aucune réussite vont dans `needs_sft.jsonl`. Le
-replay de 5 % utilise des exemples supervisés vérifiés et conversationnels propres.
+la sélection du checkpoint utilise les 60 tâches dev. Les groupes sans aucune réussite vont dans `needs_sft.jsonl`.
+Le pilote historique utilisait un replay de 5 % ; la continuation stabilisée utilise
+0,15 avec rétention équilibrée et exemples conversationnels propres.
 Le scheduler lit et hache `profile.json` : 80 % des prompts ciblent les lignes
 dynamiques mesurées et 20 % explorent les schémas à zéro succès ou absents du petit
 profil. Ces derniers reçoivent aussi un bridge supervisé canonique dans le replay. Refuser une reprise si le hash du
 profil diffère, et ne pas remplacer ce curriculum par un tirage uniforme sans nouvelle
 mesure pass@k.
+
+La branche longue initiale a culminé au step 60 à 0,550 (33/60), puis oscillé à
+27/60, 32/60 et 29/60 aux steps 70/80/90 avec des KL ponctuelles de 0,09 à 0,14.
+Pour une reprise stabilisée, repartir de `best` au step 60, réinitialiser AdamW,
+utiliser LR 5e-7 et replay 0,15. Le replay par défaut contient une ligne de rétention
+cyclique équilibrée entre les six capacités et une ligne conversationnelle curée.
+Une KL <=0,05 est acceptée normalement ; entre 0,05 et 0,12, snapshotter modèle et
+Adam sur CPU, mesurer la KL post-step et restaurer les deux si elle franchit 0,12 ;
+au-delà de 0,12 avant le step, refuser sans mutation. Trois excursions rapprochées
+divisent le LR par deux. Une baisse dev stricte supérieure à 0,05 provoque un arrêt
+propre en conservant `ckpt_best`. Les snapshots transactionnels ne doivent être créés
+que dans la zone d'alerte car ils occupent environ la taille d'un checkpoint en RAM CPU.
 
 Seul `reasoning_program` possède une difficulté scalaire réellement utilisée par le
 générateur. Pour les autres capacités, adapter en ligne le poids de chaque ligne

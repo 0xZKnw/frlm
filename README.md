@@ -356,8 +356,12 @@ python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 \
   --updates 10 --prompts 3 --group 6 --max-new 112 --micro-bs 2 \
   --lr 2e-6 --kl-beta 0.018 --kl-target 0.012 --replay-weight 0.05 \
   --eval-tasks 60
+# Stable continuation from the fixed-dev best checkpoint.
 python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 \
-  --updates 200 --resume latest
+  --updates 200 --resume best --reset-optimizer --lr 5e-7 \
+  --kl-beta 0.10 --kl-beta-max 1.0 --kl-target 0.012 \
+  --kl-soft-max 0.05 --kl-hard-max 0.12 --replay-weight 0.15 \
+  --max-dev-drop 0.05
 ```
 
 The first 10-update RTX 4060 pilot improved the fixed 60-task greedy macro from
@@ -383,6 +387,20 @@ cannot survive a stricter verifier.
 When resuming an older best checkpoint, later metric rows are moved to a separate
 `metrics_abandoned_after_*.jsonl` file and `ckpt_latest.pt` is repointed atomically;
 the replacement branch therefore keeps an unambiguous history without deleting it.
+
+The first long branch peaked at update 60 with **0.550 (33/60)**: grounded 10/10,
+code 10/10, uncertainty 10/10 and state tracking 3/10. It then oscillated to 27/60,
+32/60 and 29/60 at updates 70/80/90 while sampled KL repeatedly reached 0.09--0.14
+with beta already capped at 0.1. The stabilized continuation therefore resets Adam,
+uses a 4x lower base LR and 3x supervised replay. One replay row per default update
+cycles evenly through all six capabilities; the other keeps curated chat/retention.
+KL up to 0.05 is normal, 0.05--0.12 is a warning zone, and only values above 0.12
+are rejected immediately. Warning-zone updates snapshot policy and Adam exactly on
+CPU, measure KL again after `optimizer.step()`, and restore both if the hard boundary
+is crossed. Three nearby excursions halve LR automatically. A fixed-dev loss greater
+than 0.05 stops cleanly while preserving `ckpt_best`. Transaction snapshots are only
+created in the warning zone because they require roughly one checkpoint worth of CPU
+RAM and add latency.
 
 The frozen reference is intentionally fp32. A real RTX 4060 smoke test measured an
 initial token KL of about **0.96** with a bf16 reference despite identical source
