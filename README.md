@@ -466,8 +466,11 @@ python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 \
 python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 \
   --updates 200 --resume best --reset-optimizer --lr 5e-7 \
   --kl-beta 0.10 --kl-beta-max 1.0 --kl-target 0.012 \
-  --kl-soft-max 0.05 --kl-hard-max 0.12 --replay-weight 0.15 \
-  --retention-kl-weight 0.05 --eval-every 5 --max-dev-drop 0.05 \
+  --kl-soft-max 0.05 --kl-hard-max 0.12 --replay-weight 0.25 \
+  --retention-kl-weight 0.10 --retention-kl-target 0.08 \
+  --retention-kl-soft-max 0.20 --retention-kl-hard-max 0.50 \
+  --retention-excursion-patience 2 --max-retention-rejections 4 \
+  --eval-every 5 --max-dev-drop 0.05 \
   --max-capability-drop 0.10 --max-auto-recoveries 6
 ```
 
@@ -527,12 +530,20 @@ weight is multiplied by the squared capability deficit, so grounded/code/uncerta
 at 10/10 receive almost no RL budget while reasoning/constraints/state are targeted.
 Schemas at 0/32 never waste a GRPO group: they alternate with balanced all-capability
 retention in canonical supervised replay. Replay also carries a selected-token KL to
-the frozen resumed teacher (`retention_kl_weight=0.05`). Evaluation runs every five
+the frozen resumed teacher. Since that KL is measured on a different distribution from
+the rollout KL, it has its own persisted EMA and thresholds. Above the target, its loss
+weight grows continuously up to 4x; repeated warning-zone excursions strengthen replay
+and halve LR. Risky updates snapshot policy and Adam before `optimizer.step()`, remeasure
+the same retention batch afterwards, and reject an aggravation beyond the hard boundary.
+A corrective update that lowers an already-high retention KL remains allowed. Four hard
+retention rejections recover from the physical best checkpoint. Evaluation runs every five
 accepted updates. A checkpoint becomes best only if its macro improves without falling
 more than 1/10 below any historical capability peak. A macro loss over 3/60 or a floor
 violation rolls policy and Adam back to `ckpt_best`, halves LR, raises beta, strengthens
 replay and continues automatically. Six unsuccessful recovery branches are allowed;
 after that safety budget, training exits on `ckpt_best` rather than saving a bad branch.
+Automatic recovery restores the best policy and Adam moments before applying the smaller
+LR and stronger replay, so rejected branches cannot contaminate the optimizer state.
 
 The frozen reference is intentionally fp32. A real RTX 4060 smoke test measured an
 initial token KL of about **0.96** with a bf16 reference despite identical source

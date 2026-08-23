@@ -157,7 +157,7 @@ def profile(run: str, data_dir: str, out_dir: str, init_stage: str, init_ckpt: s
 def cmd_profile(args):
     profile(args.run, args.data_dir, args.out_dir, args.init_stage, args.init_ckpt,
             args.tasks, args.k, args.frontier_k, args.max_new, args.seed, args.device,
-            args.output, args.refine_from)
+            args.output, args.refine_from, args.output_stage)
 
 
 def main():
@@ -174,6 +174,7 @@ def main():
     parser.add_argument("--seed", type=int, default=455_001)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", default="profile.json")
+    parser.add_argument("--output-stage", default="rlvr-v45")
     parser.add_argument("--refine-from", default="")
     cmd_profile(parser.parse_args())
 

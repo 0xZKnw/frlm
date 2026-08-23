@@ -62,7 +62,7 @@ class RLVRConfig:
     kl_hard_max: float = 0.12
     kl_excursion_patience: int = 3
     min_lr_scale: float = 0.125
-    replay_weight: float = 0.15
+    replay_weight: float = 0.25
     grad_clip: float = 1.0
     oversample: float = 4.0
     eval_every: int = 5
@@ -73,7 +73,14 @@ class RLVRConfig:
     max_kl_rejections: int = 12
     max_dev_drop: float = 0.05
     max_capability_drop: float = 0.10
-    retention_kl_weight: float = 0.05
+    retention_kl_weight: float = 0.10
+    retention_kl_target: float = 0.08
+    retention_kl_soft_max: float = 0.20
+    retention_kl_hard_max: float = 0.50
+    retention_kl_ema_alpha: float = 0.20
+    retention_excursion_patience: int = 2
+    retention_pressure_max: float = 4.0
+    max_retention_rejections: int = 4
     max_auto_recoveries: int = 6
     seed: int = 455_100
     device: str = "cuda"
@@ -163,6 +170,17 @@ class RLVRTrainer:
             raise ValueError("gates de capacité ou reprises automatiques invalides")
         if cfg.retention_kl_weight < 0:
             raise ValueError("retention_kl_weight doit être positif")
+        if not (0 < cfg.retention_kl_target < cfg.retention_kl_soft_max
+                < cfg.retention_kl_hard_max):
+            raise ValueError(
+                "il faut retention_kl_target < retention_kl_soft_max "
+                "< retention_kl_hard_max"
+            )
+        if not (0 < cfg.retention_kl_ema_alpha <= 1):
+            raise ValueError("retention_kl_ema_alpha doit être dans ]0, 1]")
+        if (cfg.retention_excursion_patience < 1 or cfg.retention_pressure_max < 1
+                or cfg.max_retention_rejections < 1):
+            raise ValueError("contrôle de rétention invalide")
         if cfg.device.startswith("cuda") and not torch.cuda.is_available():
             raise RuntimeError("CUDA demandé mais indisponible")
         self.device = cfg.device
@@ -219,6 +237,9 @@ class RLVRTrainer:
         self.optimizer_start_update = 0
         self.replay_index = 0
         self.replay_scale = 1.0
+        self.retention_kl_ema = 0.0
+        self.retention_observations = 0
+        self.retention_excursions = 0
         self.best_score = -1.0
         self.baseline_score = None
         self.best_per_capability: dict[str, float] = {}
@@ -321,6 +342,9 @@ class RLVRTrainer:
             "optimizer_start_update": self.optimizer_start_update,
             "replay_index": self.replay_index,
             "replay_scale": self.replay_scale,
+            "retention_kl_ema": self.retention_kl_ema,
+            "retention_observations": self.retention_observations,
+            "retention_excursions": self.retention_excursions,
             "best_score": self.best_score, "baseline_score": self.baseline_score,
             "best_per_capability": self.best_per_capability,
             "capability_peaks": self.capability_peaks,
@@ -386,6 +410,12 @@ class RLVRTrainer:
                              else int(checkpoint.get("replay_index", 0)))
         self.replay_scale = (1.0 if self.cfg.reset_optimizer_on_resume
                              else float(checkpoint.get("replay_scale", 1.0)))
+        self.retention_kl_ema = (0.0 if self.cfg.reset_optimizer_on_resume
+                                 else float(checkpoint.get("retention_kl_ema", 0.0)))
+        self.retention_observations = (0 if self.cfg.reset_optimizer_on_resume
+                                       else int(checkpoint.get("retention_observations", 0)))
+        self.retention_excursions = (0 if self.cfg.reset_optimizer_on_resume
+                                     else int(checkpoint.get("retention_excursions", 0)))
         self.best_score = float(checkpoint.get("best_score", -1.0))
         self.baseline_score = checkpoint.get("baseline_score")
         self.best_per_capability = {
@@ -571,6 +601,9 @@ class RLVRTrainer:
             "kl_beta": self.kl_beta, "lr_scale": self.lr_scale,
             "kl_excursions": self.kl_excursions, "replay_index": self.replay_index,
             "replay_scale": self.replay_scale,
+            "retention_kl_ema": self.retention_kl_ema,
+            "retention_observations": self.retention_observations,
+            "retention_excursions": self.retention_excursions,
         }
 
     def _restore_control_state(self, state: dict):
@@ -587,6 +620,9 @@ class RLVRTrainer:
         self.kl_excursions = int(state["kl_excursions"])
         self.replay_index = int(state["replay_index"])
         self.replay_scale = float(state["replay_scale"])
+        self.retention_kl_ema = float(state["retention_kl_ema"])
+        self.retention_observations = int(state["retention_observations"])
+        self.retention_excursions = int(state["retention_excursions"])
 
     def _snapshot_train_state(self) -> dict:
         """Snapshot CPU exact, réservé aux updates dans la zone KL d'alerte."""
@@ -615,6 +651,47 @@ class RLVRTrainer:
         previous = self.lr_scale
         self.lr_scale = max(self.cfg.min_lr_scale, self.lr_scale * 0.5)
         self.kl_excursions = 0
+        return self.lr_scale < previous
+
+    def _next_retention_ema(self, value: float) -> float:
+        """Projette l'EMA sans muter le contrôleur (utile avant acceptation)."""
+        if self.retention_observations == 0:
+            return value
+        alpha = self.cfg.retention_kl_ema_alpha
+        return (1.0 - alpha) * self.retention_kl_ema + alpha * value
+
+    def _retention_pressure(self, value: float) -> float:
+        """Renforce continûment la KL de rétention sur les exemples déjà déplacés."""
+        ratio = value / max(self.cfg.retention_kl_target, 1e-12)
+        return max(1.0, min(self.cfg.retention_pressure_max, ratio))
+
+    def _retention_post_is_hard(self, before: float, after: float) -> bool:
+        """Refuse une aggravation dure, mais autorise une update qui corrige la dérive."""
+        if not math.isfinite(after):
+            return True
+        if after <= before + 1e-12:
+            return False
+        return (after > self.cfg.retention_kl_hard_max
+                or self._next_retention_ema(after) > self.cfg.retention_kl_hard_max)
+
+    def _register_retention_kl(self, value: float) -> bool:
+        """Suit la dérive de rétention et durcit replay/LR avant la perte au dev."""
+        if not math.isfinite(value):
+            value = self.cfg.retention_kl_hard_max * 2.0
+        self.retention_kl_ema = self._next_retention_ema(value)
+        self.retention_observations += 1
+        excursion = (value > self.cfg.retention_kl_soft_max
+                     or self.retention_kl_ema > self.cfg.retention_kl_soft_max)
+        if excursion:
+            self.retention_excursions += 1
+            self.replay_scale = min(3.0, self.replay_scale * 1.15)
+        else:
+            self.retention_excursions = max(0, self.retention_excursions - 1)
+        if self.retention_excursions < self.cfg.retention_excursion_patience:
+            return False
+        previous = self.lr_scale
+        self.lr_scale = max(self.cfg.min_lr_scale, self.lr_scale * 0.5)
+        self.retention_excursions = 0
         return self.lr_scale < previous
 
     def _dev_regression(self, macro: float) -> bool:
@@ -647,22 +724,47 @@ class RLVRTrainer:
             )
 
     def _recover_from_best(self, reason: str, failures: dict | None = None) -> bool:
-        """Rollback vers le best, durcit la rétention et reprend avec un LR plus petit."""
+        """Rollback policy+Adam vers le best, puis durcit la branche suivante."""
         can_continue = self.recovery_count < self.cfg.max_auto_recoveries
         path = resolve_checkpoint(self.run_dir, self.cfg.stage_name, "best")
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         previous_update = self.update
         previous_scale = self.lr_scale
         previous_beta = self.kl_beta
+        previous_replay_scale = self.replay_scale
         self.model.load_state_dict(checkpoint["model"])
         self.update = int(checkpoint.get("accepted_updates", checkpoint.get("step", 0)))
         self.optimizer = self._make_optimizer()
-        self.optimizer_start_update = self.update
+        optimizers = checkpoint.get("optimizers", [])
+        if optimizers:
+            self.optimizer.load_state_dict(optimizers[0])
+        self.optimizer_start_update = int(checkpoint.get("optimizer_start_update", self.update))
         self.lr_scale = max(self.cfg.min_lr_scale, previous_scale * 0.5)
         self.kl_beta = min(self.cfg.kl_beta_max,
                            max(self.cfg.kl_beta, previous_beta * 1.5))
         self.kl_excursions = 0
-        self.replay_scale = min(2.0, self.replay_scale * 1.25)
+        self.replay_index = int(checkpoint.get("replay_index", getattr(self, "replay_index", 0)))
+        self.replay_scale = min(
+            3.0, max(previous_replay_scale, float(checkpoint.get("replay_scale", 1.0))) * 1.25
+        )
+        self.retention_kl_ema = float(checkpoint.get("retention_kl_ema", 0.0))
+        self.retention_observations = int(checkpoint.get("retention_observations", 0))
+        self.retention_excursions = 0
+        saved_difficulty = checkpoint.get("difficulty", {})
+        for capability in getattr(self, "difficulty", {}):
+            if capability in saved_difficulty:
+                self.difficulty[capability] = float(saved_difficulty[capability])
+        for key, value in checkpoint.get("frontier_scales", {}).items():
+            if key in getattr(self, "frontier_scales", {}):
+                self.frontier_scales[key] = float(value)
+        for key, values in checkpoint.get("frontier_history", {}).items():
+            if key in getattr(self, "frontier_history", {}):
+                self.frontier_history[key].clear()
+                self.frontier_history[key].extend(float(value) for value in values)
+        for key, values in checkpoint.get("cap_history", {}).items():
+            if key in getattr(self, "cap_history", {}):
+                self.cap_history[key].clear()
+                self.cap_history[key].extend(float(value) for value in values)
         if can_continue:
             self.recovery_count += 1
         del checkpoint
@@ -778,6 +880,28 @@ class RLVRTrainer:
             del difference, kl_tokens
         return total
 
+    @torch.inference_mode()
+    def _measure_retention_kl(self, replay_x: torch.Tensor,
+                              replay_y: torch.Tensor) -> float:
+        """Mesure la KL sélectionnée sur exactement le même lot de rétention."""
+        self.model.eval()
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.use_cuda):
+            logits, _, _ = self.model(replay_x, diagnostics=False)
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.use_cuda):
+            ref_logits, _, _ = self.ref(replay_x, diagnostics=False)
+        mask = replay_y.ne(-100)
+        targets = replay_y.clamp_min(0)
+        vocab = logits.shape[-1]
+        logp = -F.cross_entropy(
+            logits.reshape(-1, vocab).float(), targets.reshape(-1), reduction="none"
+        ).view_as(targets)
+        ref_logp = -F.cross_entropy(
+            ref_logits.reshape(-1, vocab).float(), targets.reshape(-1), reduction="none"
+        ).view_as(targets)
+        difference = ref_logp - logp
+        tokens = difference.exp() - difference - 1.0
+        return float(tokens[mask].mean())
+
     def _train_update(self, groups) -> dict:
         batches, constant_denominator = self._make_microbatches(groups)
         self.model.train()
@@ -816,21 +940,12 @@ class RLVRTrainer:
 
         common = {"pg": pg_total, "kl": kl_total, "post_kl": None,
                   "replay": 0.0, "retention_kl": 0.0,
+                  "retention_kl_post": None, "retention_pressure": 1.0,
                   "grad_norm": 0.0, "lr": lr,
                   "tokens": token_count}
         if not math.isfinite(kl_total) or kl_total > self.cfg.kl_hard_max:
             self.optimizer.zero_grad(set_to_none=True)
             return {**common, "accepted": False, "reject_reason": "kl_pre_hard"}
-
-        transaction = None
-        if kl_total > self.cfg.kl_soft_max:
-            try:
-                transaction = self._snapshot_train_state()
-            except (MemoryError, RuntimeError):
-                self.optimizer.zero_grad(set_to_none=True)
-                gc.collect()
-                return {**common, "accepted": False,
-                        "reject_reason": "transaction_snapshot_failed"}
 
         replay_x, replay_y = self._replay_batch()
         replay_x = replay_x.to(self.device, non_blocking=self.use_cuda)
@@ -856,14 +971,47 @@ class RLVRTrainer:
         replay_difference = replay_ref_logp - replay_logp
         retention_tokens = replay_difference.exp() - replay_difference - 1.0
         retention_kl = retention_tokens[replay_mask].mean()
-        (self.cfg.replay_weight * self.replay_scale * replay_loss
-         + self.cfg.retention_kl_weight * self.replay_scale * retention_kl).backward()
-        grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(),
-                                                         self.cfg.grad_clip))
         replay_value = float(replay_loss.detach())
         retention_value = float(retention_kl.detach())
-        if (not math.isfinite(replay_value) or not math.isfinite(retention_value)
-                or not math.isfinite(grad_norm)):
+        if not math.isfinite(replay_value) or not math.isfinite(retention_value):
+            self.optimizer.zero_grad(set_to_none=True)
+            del replay_x, replay_y, _logits, replay_loss, replay_ref_logits
+            del replay_mask, replay_targets, replay_logp, replay_ref_logp
+            del replay_difference, retention_tokens, retention_kl
+            gc.collect()
+            return {**common, "post_kl": float("nan"), "replay": replay_value,
+                    "retention_kl": retention_value,
+                    "grad_norm": float("nan"), "accepted": False,
+                    "reject_reason": "nonfinite_replay_or_grad"}
+
+        # Un snapshot policy+Adam coûte cher sur 16 Go de RAM. Il est donc créé
+        # uniquement lorsque la KL rollout ou la rétention approchent leur zone
+        # utile de contrôle, mais avant toute mutation de l'optimiseur.
+        transaction = None
+        retention_risk = (
+            retention_value >= self.cfg.retention_kl_target / 2.0
+            or self._next_retention_ema(retention_value) >= self.cfg.retention_kl_target
+        )
+        if kl_total > self.cfg.kl_soft_max or retention_risk:
+            try:
+                transaction = self._snapshot_train_state()
+            except (MemoryError, RuntimeError):
+                self.optimizer.zero_grad(set_to_none=True)
+                del replay_x, replay_y, _logits, replay_loss, replay_ref_logits
+                del replay_mask, replay_targets, replay_logp, replay_ref_logp
+                del replay_difference, retention_tokens, retention_kl
+                gc.collect()
+                return {**common, "replay": replay_value,
+                        "retention_kl": retention_value, "accepted": False,
+                        "reject_reason": "transaction_snapshot_failed"}
+
+        retention_pressure = self._retention_pressure(retention_value)
+        (self.cfg.replay_weight * self.replay_scale * replay_loss
+         + self.cfg.retention_kl_weight * self.replay_scale
+         * retention_pressure * retention_kl).backward()
+        grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(),
+                                                         self.cfg.grad_clip))
+        if not math.isfinite(grad_norm):
             self.optimizer.zero_grad(set_to_none=True)
             del replay_x, replay_y, _logits, replay_loss, replay_ref_logits
             del replay_mask, replay_targets, replay_logp, replay_ref_logp
@@ -871,29 +1019,45 @@ class RLVRTrainer:
             if transaction is not None:
                 del transaction
             gc.collect()
-            return {**common, "post_kl": float("nan"), "replay": replay_value,
+            return {**common, "replay": replay_value,
                     "retention_kl": retention_value,
+                    "retention_pressure": retention_pressure,
                     "grad_norm": grad_norm, "accepted": False,
                     "reject_reason": "nonfinite_replay_or_grad"}
         self.optimizer.step()
+        post_kl = post_retention = None
+        if transaction is not None:
+            post_kl = self._measure_kl(batches, constant_denominator)
+            post_retention = self._measure_retention_kl(replay_x, replay_y)
+            retention_hard = self._retention_post_is_hard(
+                retention_value, post_retention
+            )
+            if (not math.isfinite(post_kl) or post_kl > self.cfg.kl_hard_max
+                    or not math.isfinite(post_retention) or retention_hard):
+                self._restore_train_state(transaction)
+                del transaction
+                del replay_x, replay_y, _logits, replay_loss, replay_ref_logits
+                del replay_mask, replay_targets, replay_logp, replay_ref_logp
+                del replay_difference, retention_tokens, retention_kl
+                gc.collect()
+                reason = ("retention_post_hard"
+                          if not math.isfinite(post_retention) or retention_hard
+                          else "kl_post_hard")
+                return {**common, "post_kl": post_kl,
+                        "replay": replay_value, "retention_kl": retention_value,
+                        "retention_kl_post": post_retention,
+                        "retention_pressure": retention_pressure,
+                        "grad_norm": grad_norm, "accepted": False,
+                        "reject_reason": reason}
+            del transaction
+            gc.collect()
         del replay_x, replay_y, _logits, replay_loss, replay_ref_logits
         del replay_mask, replay_targets, replay_logp, replay_ref_logp
         del replay_difference, retention_tokens, retention_kl
-        post_kl = None
-        if transaction is not None:
-            post_kl = self._measure_kl(batches, constant_denominator)
-            if not math.isfinite(post_kl) or post_kl > self.cfg.kl_hard_max:
-                self._restore_train_state(transaction)
-                del transaction
-                gc.collect()
-                return {**common, "post_kl": post_kl,
-                        "replay": replay_value, "retention_kl": retention_value,
-                        "grad_norm": grad_norm, "accepted": False,
-                        "reject_reason": "kl_post_hard"}
-            del transaction
-            gc.collect()
         return {**common, "post_kl": post_kl, "replay": replay_value,
                 "retention_kl": retention_value,
+                "retention_kl_post": post_retention,
+                "retention_pressure": retention_pressure,
                 "grad_norm": grad_norm, "accepted": True, "reject_reason": None}
 
     @torch.inference_mode()
@@ -964,6 +1128,11 @@ class RLVRTrainer:
         print(f"[i] Ancre KL fp32 · {ref_meta.get('stage')} "
               f"step {ref_meta.get('step')} · "
               f"source {ref_meta.get('anchor', 'explicite')}")
+        print(f"[i] Rétention transactionnelle · cible {self.cfg.retention_kl_target:.2f} · "
+              f"alerte {self.cfg.retention_kl_soft_max:.2f} · "
+              f"rejet {self.cfg.retention_kl_hard_max:.2f} · "
+              f"replay {self.cfg.replay_weight:.2f} · "
+              f"KL poids {self.cfg.retention_kl_weight:.2f}")
         if self.profile is not None:
             frontier = ", ".join(sorted({row["schema_id"] for row in self.frontier_specs}))
             bridge = ", ".join(sorted({row["schema_id"] for row in self.bridge_specs}))
@@ -985,6 +1154,7 @@ class RLVRTrainer:
         stop_file = self.run_dir / "STOP"
         empty_batches = 0
         rejected_kl_streak = 0
+        rejected_retention_streak = 0
         rejections_path = self.stage_dir / "rejected_updates.jsonl"
         while self.update < self.cfg.accepted_updates and not self.stop_requested:
             started = time.time()
@@ -1009,29 +1179,52 @@ class RLVRTrainer:
                 observed_kl = train_stats["post_kl"]
                 if observed_kl is None or not math.isfinite(observed_kl):
                     observed_kl = train_stats["kl"]
+                observed_retention = train_stats.get("retention_kl_post")
+                if observed_retention is None or not math.isfinite(observed_retention):
+                    observed_retention = train_stats.get("retention_kl", 0.0)
                 lr_reduced = self._register_kl(float(observed_kl))
-                rejected_kl_streak += 1
+                lr_reduced = (self._register_retention_kl(float(observed_retention))
+                              or lr_reduced)
+                retention_rejection = str(train_stats["reject_reason"]).startswith("retention_")
+                rejected_retention_streak = (rejected_retention_streak + 1
+                                             if retention_rejection else 0)
+                rejected_kl_streak = (0 if retention_rejection else rejected_kl_streak + 1)
                 rejection = {
                     "after_update": self.update, "rollout_index": self.rollout_index,
                     "reason": train_stats["reject_reason"],
                     "kl": train_stats["kl"], "post_kl": train_stats["post_kl"],
+                    "retention_kl": train_stats.get("retention_kl"),
+                    "retention_kl_post": train_stats.get("retention_kl_post"),
+                    "retention_kl_ema": self.retention_kl_ema,
                     "kl_beta": self.kl_beta, "lr_scale": self.lr_scale,
+                    "replay_scale": self.replay_scale,
                     "lr_reduced": lr_reduced, "elapsed_s": time.time() - started,
                 }
                 with rejections_path.open("a", encoding="utf-8") as stream:
                     stream.write(json.dumps(rejection, ensure_ascii=False) + "\n")
                 print(f"[!] Update {self.update + 1} rejetée ({train_stats['reject_reason']}) · "
-                      f"KL {train_stats['kl']:.4f} · post "
-                      f"{train_stats['post_kl'] if train_stats['post_kl'] is not None else '-'} · "
-                      f"beta {self.kl_beta:.3f} · lr×{self.lr_scale:.3f}")
-                if rejected_kl_streak >= self.cfg.max_kl_rejections:
+                       f"KL {train_stats['kl']:.4f} · post "
+                       f"{train_stats['post_kl'] if train_stats['post_kl'] is not None else '-'} · "
+                       f"retKL {train_stats.get('retention_kl', 0.0):.4f} → "
+                       f"{train_stats.get('retention_kl_post')} · "
+                       f"beta {self.kl_beta:.3f} · lr×{self.lr_scale:.3f}")
+                if rejected_retention_streak >= self.cfg.max_retention_rejections:
+                    if not self._recover_from_best("retention_rejections"):
+                        self.stop_requested = True
+                    rejected_retention_streak = 0
+                elif rejected_kl_streak >= self.cfg.max_kl_rejections:
                     if not self._recover_from_best("kl_rejections"):
                         self.stop_requested = True
                     rejected_kl_streak = 0
                 continue
             rejected_kl_streak = 0
+            rejected_retention_streak = 0
             observed_kl = max(train_stats["kl"], train_stats["post_kl"] or 0.0)
             lr_reduced = self._register_kl(observed_kl)
+            observed_retention = max(
+                train_stats["retention_kl"], train_stats["retention_kl_post"] or 0.0
+            )
+            lr_reduced = self._register_retention_kl(observed_retention) or lr_reduced
             self.update += 1
             success_rate = rollout["successes"] / max(1, rollout["samples"])
             record = {
@@ -1042,6 +1235,8 @@ class RLVRTrainer:
                 "mean_length": rollout["tokens"] / max(1, rollout["samples"]),
                 "tokens_generated": self.tokens_generated, "kl_beta": self.kl_beta,
                 "lr_scale": self.lr_scale, "lr_reduced": lr_reduced,
+                "replay_scale": self.replay_scale,
+                "retention_kl_ema": self.retention_kl_ema,
                 "difficulty": dict(self.difficulty),
                 "frontier_scales": dict(self.frontier_scales),
                 "elapsed_s": time.time() - started,
@@ -1053,7 +1248,8 @@ class RLVRTrainer:
             if self.update % self.cfg.eval_every == 0 or self.update == self.cfg.accepted_updates:
                 evaluation = self._evaluate()
                 record["eval"] = evaluation
-                safe_kl = train_stats["kl"] <= self.cfg.kl_soft_max
+                safe_kl = (train_stats["kl"] <= self.cfg.kl_soft_max
+                           and self.retention_kl_ema <= self.cfg.retention_kl_soft_max)
                 capability_ok, capability_failures = self._capability_gate(evaluation)
                 if evaluation["macro"] > self.best_score and safe_kl and capability_ok:
                     self.best_score = evaluation["macro"]
@@ -1072,10 +1268,14 @@ class RLVRTrainer:
                 )
             with self.metrics_path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+            post_retention_text = ("-" if train_stats["retention_kl_post"] is None
+                                   else f"{train_stats['retention_kl_post']:.4f}")
             print(f"update {self.update:3d}/{self.cfg.accepted_updates} · "
                   f"ok {100*success_rate:4.1f}% · groupes {len(groups)}/{int(rollout['attempts'])} · "
                   f"KL {train_stats['kl']:.4f} · replay {train_stats['replay']:.3f} · "
-                  f"retKL {train_stats['retention_kl']:.4f} · "
+                  f"retKL {train_stats['retention_kl']:.4f}"
+                  f"→{post_retention_text} "
+                  f"EMA {self.retention_kl_ema:.4f} · pression×{train_stats['retention_pressure']:.2f} · "
                   f"lr×{self.lr_scale:.3f} · "
                   f"{time.time()-started:.1f}s")
             if recovery_reason:
@@ -1154,6 +1354,13 @@ def cmd_rl_v45(args):
         kl_excursion_patience=args.kl_excursion_patience,
         min_lr_scale=args.min_lr_scale,
         replay_weight=args.replay_weight, retention_kl_weight=args.retention_kl_weight,
+        retention_kl_target=args.retention_kl_target,
+        retention_kl_soft_max=args.retention_kl_soft_max,
+        retention_kl_hard_max=args.retention_kl_hard_max,
+        retention_kl_ema_alpha=args.retention_kl_ema_alpha,
+        retention_excursion_patience=args.retention_excursion_patience,
+        retention_pressure_max=args.retention_pressure_max,
+        max_retention_rejections=args.max_retention_rejections,
         oversample=args.oversample,
         eval_every=args.eval_every, eval_tasks=args.eval_tasks,
         save_every=args.save_every, max_kl_rejections=args.max_kl_rejections,

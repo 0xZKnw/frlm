@@ -1381,6 +1381,8 @@ def main():
     p.add_argument("--seed", type=int, default=455001)
     p.add_argument("--device", default="cuda")
     p.add_argument("--output", default="profile.json")
+    p.add_argument("--output-stage", default="rlvr-v45",
+                   help="stage dans lequel enregistrer le profil")
     p.add_argument("--refine-from", default="",
                    help="complète uniquement les rollouts pass@32 manquants d'un profil existant")
 
@@ -1410,8 +1412,15 @@ def main():
     p.add_argument("--kl-hard-max", type=float, default=0.12)
     p.add_argument("--kl-excursion-patience", type=int, default=3)
     p.add_argument("--min-lr-scale", type=float, default=0.125)
-    p.add_argument("--replay-weight", type=float, default=0.15)
-    p.add_argument("--retention-kl-weight", type=float, default=0.05)
+    p.add_argument("--replay-weight", type=float, default=0.25)
+    p.add_argument("--retention-kl-weight", type=float, default=0.10)
+    p.add_argument("--retention-kl-target", type=float, default=0.08)
+    p.add_argument("--retention-kl-soft-max", type=float, default=0.20)
+    p.add_argument("--retention-kl-hard-max", type=float, default=0.50)
+    p.add_argument("--retention-kl-ema-alpha", type=float, default=0.20)
+    p.add_argument("--retention-excursion-patience", type=int, default=2)
+    p.add_argument("--retention-pressure-max", type=float, default=4.0)
+    p.add_argument("--max-retention-rejections", type=int, default=4)
     p.add_argument("--oversample", type=float, default=4.0)
     p.add_argument("--eval-every", type=int, default=5)
     p.add_argument("--eval-tasks", type=int, default=60)

@@ -256,6 +256,18 @@ class TaskTests(unittest.TestCase):
             self.assertEqual(name, "profile_phase2.json")
             self.assertEqual(generate.call_args.args[3:5], ("rlvr-v45", "best"))
 
+    def test_profileur_ecrit_dans_le_nouveau_stage(self):
+        args = SimpleNamespace(
+            run="run", data_dir="data", out_dir="runs", init_stage="sft",
+            init_ckpt="best", tasks=60, k=6, frontier_k=32, max_new=112,
+            seed=455001, device="cpu", output="profile.json", refine_from="",
+            output_stage="rlvr-v45-retention-v2",
+        )
+        with patch("frlm.rl_profile_v45.profile") as generate:
+            from frlm.rl_profile_v45 import cmd_profile
+            cmd_profile(args)
+        self.assertEqual(generate.call_args.args[-1], "rlvr-v45-retention-v2")
+
     def test_controle_kl_reduit_le_lr_apres_trois_excursions(self):
         trainer = RLVRTrainer.__new__(RLVRTrainer)
         trainer.cfg = RLVRConfig(kl_excursion_patience=3)
@@ -268,6 +280,37 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(trainer.lr_scale, 0.5)
         self.assertEqual(trainer.kl_excursions, 0)
         self.assertGreater(trainer.kl_beta, 0.10)
+
+    def test_controle_retention_renforce_replay_et_reduit_le_lr(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.cfg = RLVRConfig(retention_excursion_patience=2)
+        trainer.retention_kl_ema = 0.0
+        trainer.retention_observations = 0
+        trainer.retention_excursions = 0
+        trainer.replay_scale = 1.0
+        trainer.lr_scale = 1.0
+        self.assertFalse(trainer._register_retention_kl(0.30))
+        self.assertAlmostEqual(trainer.replay_scale, 1.15)
+        self.assertTrue(trainer._register_retention_kl(0.35))
+        self.assertAlmostEqual(trainer.lr_scale, 0.5)
+        self.assertAlmostEqual(trainer.replay_scale, 1.15 ** 2)
+        self.assertGreater(trainer.retention_kl_ema, 0.30)
+
+    def test_pression_retention_est_bornee(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.cfg = RLVRConfig(retention_kl_target=0.08, retention_pressure_max=4.0)
+        self.assertEqual(trainer._retention_pressure(0.01), 1.0)
+        self.assertEqual(trainer._retention_pressure(0.16), 2.0)
+        self.assertEqual(trainer._retention_pressure(1.0), 4.0)
+
+    def test_gate_retention_refuse_aggravation_et_accepte_correction(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.cfg = RLVRConfig(retention_kl_hard_max=0.50)
+        trainer.retention_kl_ema = 0.10
+        trainer.retention_observations = 5
+        self.assertTrue(trainer._retention_post_is_hard(0.45, 0.55))
+        self.assertFalse(trainer._retention_post_is_hard(0.60, 0.55))
+        self.assertTrue(trainer._retention_post_is_hard(0.10, float("nan")))
 
     def test_snapshot_transactionnel_restaure_modele_et_adam(self):
         trainer = RLVRTrainer.__new__(RLVRTrainer)
@@ -356,6 +399,49 @@ class TaskTests(unittest.TestCase):
             kept = [json.loads(line)["update"]
                     for line in trainer.metrics_path.read_text().splitlines()]
             self.assertEqual(kept, [60])
+
+    def test_rollback_restaure_les_moments_adam_du_best(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = RLVRTrainer.__new__(RLVRTrainer)
+            trainer.cfg = RLVRConfig(max_auto_recoveries=2)
+            trainer.run_dir = Path(directory) / "run"
+            trainer.stage_dir = trainer.run_dir / "rlvr-v45"
+            trainer.stage_dir.mkdir(parents=True)
+            trainer.metrics_path = trainer.stage_dir / "metrics.jsonl"
+            trainer.metrics_path.write_text(json.dumps({"update": 25}) + "\n")
+            trainer.model = torch.nn.Linear(2, 1)
+            trainer.optimizer = torch.optim.AdamW(trainer.model.parameters(), lr=0.01)
+            sample = torch.tensor([[1.0, -2.0]])
+            trainer.model(sample).sum().backward()
+            trainer.optimizer.step()
+            trainer.optimizer.zero_grad(set_to_none=True)
+            best_optim = trainer._snapshot_train_state()["optimizer"]
+            torch.save({
+                "model": {key: value.detach().clone()
+                          for key, value in trainer.model.state_dict().items()},
+                "optimizers": [best_optim], "accepted_updates": 25,
+                "optimizer_start_update": 10,
+            }, trainer.stage_dir / "ckpt_best.pt")
+            trainer.model(sample).square().sum().backward()
+            trainer.optimizer.step()
+            trainer.update = 30
+            trainer.lr_scale = 1.0
+            trainer.kl_beta = 0.1
+            trainer.kl_excursions = 0
+            trainer.replay_index = 0
+            trainer.replay_scale = 1.0
+            trainer.recovery_count = 0
+            with patch("builtins.print"):
+                trainer._recover_from_best("retention_rejections")
+            restored = trainer.optimizer.state_dict()
+            for parameter, state in best_optim["state"].items():
+                for key, value in state.items():
+                    current = restored["state"][parameter][key]
+                    if torch.is_tensor(value):
+                        self.assertTrue(torch.equal(current.cpu(), value))
+                    else:
+                        self.assertEqual(current, value)
+            self.assertEqual(trainer.optimizer_start_update, 10)
 
     def test_reprise_checkpoint_pilote_sans_etat_frontiere(self):
         trainer = RLVRTrainer.__new__(RLVRTrainer)

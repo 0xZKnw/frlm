@@ -305,6 +305,21 @@ python bench/bench_ood_v2.py --run fr-v4 --data-dir data-v4 --hf none
 python bench/bench_vs.py --run fr-v4 --data-dir data-v4 --skip-hf
 ```
 
+Le RLVR v4.5 possède deux contrôleurs distincts : KL des rollouts et KL de
+rétention sur replay. Conserver leurs seuils séparés. Une reprise sûre repart du
+`best`, réinitialise Adam pour la nouvelle phase et laisse le CLI reprofiler ce
+checkpoint avant de l'ancrer :
+
+```powershell
+python run.py rl-v45 --run fr-v4-v45-reason-balanced --data-dir data-v4 --updates 200 --resume best --reset-optimizer --lr 5e-7 --eval-every 5
+```
+
+Au-dessus de la cible de rétention, le trainer augmente automatiquement sa
+pression et le replay. Dans la zone risquée il snapshotte policy et Adam sur CPU,
+puis rejette transactionnellement une aggravation au-delà du seuil dur. Ne pas
+retirer ce rollback exact ni fusionner `retention_kl` avec la KL rollout : les
+deux métriques portent sur des distributions différentes.
+
 Les commandes de préparation téléchargent et écrivent beaucoup de données. Les
 entraînements, `bench_speed` et certains benchmarks exigent un GPU et peuvent être
 longs ou coûteux. Ne pas les lancer comme simple validation sans accord explicite.
