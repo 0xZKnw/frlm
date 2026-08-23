@@ -29,7 +29,7 @@ from frlm.rl_engine_v45 import (
     RolloutEngine, clone_reference, load_policy, resolve_checkpoint, resolve_tokenizer,
 )
 from frlm.rl_tasks_v45 import CAPABILITY_WEIGHTS, SCHEMAS_BY_CAPABILITY, TaskSpec, make_task
-from frlm.verifiers_v45 import final_text, verify
+from frlm.verifiers_v45 import VERIFIER_VERSION, final_text, verify
 
 
 DIFFICULTY_AWARE_CAPABILITIES = {"reasoning_program"}
@@ -177,6 +177,7 @@ class RLVRTrainer:
         self.kl_beta = cfg.kl_beta
         self.best_score = -1.0
         self.baseline_score = None
+        self._resume_revalidate = False
         # Seul reasoning_program possède une difficulté sémantique graduelle.
         # Les autres familles adaptent directement le poids de leurs frontières.
         self.difficulty = {capability: 0.25
@@ -202,7 +203,8 @@ class RLVRTrainer:
                         "bridge_schemas": sorted({row["schema_id"]
                                                   for row in self.bridge_specs}),
                         "adaptive_frontiers": len(self.frontier_specs),
-                        "semantic_difficulty": sorted(DIFFICULTY_AWARE_CAPABILITIES)},
+                        "semantic_difficulty": sorted(DIFFICULTY_AWARE_CAPABILITIES),
+                        "verifier_version": VERIFIER_VERSION},
                        ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
@@ -263,6 +265,7 @@ class RLVRTrainer:
             "tokens_generated": self.tokens_generated, "kl_beta": self.kl_beta,
             "best_score": self.best_score, "baseline_score": self.baseline_score,
             "difficulty": self.difficulty, "profile_sha256": self.profile_sha256,
+            "verifier_version": VERIFIER_VERSION,
             "frontier_scales": self.frontier_scales,
             "frontier_history": {key: list(history)
                                  for key, history in self.frontier_history.items()},
@@ -298,6 +301,7 @@ class RLVRTrainer:
         self.kl_beta = float(checkpoint.get("kl_beta", self.cfg.kl_beta))
         self.best_score = float(checkpoint.get("best_score", -1.0))
         self.baseline_score = checkpoint.get("baseline_score")
+        self._resume_revalidate = checkpoint.get("verifier_version") != VERIFIER_VERSION
         saved_difficulty = checkpoint.get("difficulty", {})
         for capability in DIFFICULTY_AWARE_CAPABILITIES:
             if capability in saved_difficulty:
@@ -323,6 +327,9 @@ class RLVRTrainer:
         del checkpoint
         gc.collect()
         print(f"[i] Reprise RLVR v4.5 : {path.name}, update {self.update}")
+        if self._resume_revalidate:
+            print(f"[i] Vérificateur mis à jour vers {VERIFIER_VERSION} : "
+                  "le score du checkpoint sera recalculé avant la reprise.")
 
     def _next_task(self) -> TaskSpec:
         self._last_frontier_key = None
@@ -561,6 +568,16 @@ class RLVRTrainer:
                 json.dumps(baseline, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             print(f"[i] Baseline dev macro : {self.baseline_score:.3f}")
+            self._resume_revalidate = False
+        elif self._resume_revalidate:
+            resumed_eval = self._evaluate()
+            self.best_score = resumed_eval["macro"]
+            (self.stage_dir / f"eval_resume_{self.update:06d}.json").write_text(
+                json.dumps(resumed_eval, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self._resume_revalidate = False
+            print(f"[i] Checkpoint revalidé avec {VERIFIER_VERSION} : "
+                  f"macro {self.best_score:.3f}")
         print(f"[i] RLVR v4.5 local · cible {self.cfg.accepted_updates} updates acceptées · "
               f"{self.cfg.prompts_per_update}×{self.cfg.group_size} rollouts · lr {self.cfg.lr:.1e}")
         if self.profile is not None:

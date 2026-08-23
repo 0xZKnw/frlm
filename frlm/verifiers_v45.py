@@ -21,6 +21,7 @@ from frlm.data import EOT, IM_END, THINK, THINK_END
 
 
 AnswerKind = Literal["integer", "rational", "choice", "entity", "json", "abstain", "code"]
+VERIFIER_VERSION = "typed_v45_2"
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class AnswerSpec:
     json_schema: dict[str, str] | None = None
     tests: tuple[tuple[list[Any], Any], ...] = ()
     function_name: str | None = None
+    strict_number_only: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -247,6 +249,16 @@ def verify(spec: AnswerSpec, generation: str) -> Verification:
     if not text:
         return Verification(False, 0.0, failure_code="empty_final")
     if spec.kind in ("integer", "rational"):
+        if spec.strict_number_only:
+            if spec.kind != "integer" or re.fullmatch(r"[-+]?\d+", text) is None:
+                return Verification(False, 0.0, format_score=0.0,
+                                    failure_code="number_only_format")
+            value = _fraction(text)
+            expected = _fraction(str(spec.value))
+            ok = value == expected
+            return Verification(ok, float(ok), format_score=1.0,
+                                parsed_answer=str(value),
+                                failure_code=None if ok else "number_wrong")
         value, error, raw = _parse_number_details(text)
         if error:
             return Verification(False, 0.0, failure_code=error)

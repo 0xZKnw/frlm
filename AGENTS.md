@@ -191,6 +191,13 @@ raisonnement : quatre capacités restent à zéro.
 le motif doit donc rester intégralement non accentué. Tester à la fois les formulations
 accentuées et non accentuées lors de toute modification.
 
+Les tâches `constraint_number_only` utilisent `AnswerSpec.strict_number_only` : la
+réponse visible doit être exactement un entier signé, sans explication ni ponctuation.
+Ne pas réintroduire un raccourci par nombre marqué (`donc 121`) pour ce schéma.
+La version du vérificateur est inscrite dans les nouveaux checkpoints. Une reprise
+d'un checkpoint plus ancien doit recalculer la macro dev avant toute nouvelle update
+et remplacer en mémoire le meilleur score devenu incomparable.
+
 Le RLAIF v4.5 produit deux paquets aveugles A/B dont l'ordre des candidats est inversé.
 Les jugements doivent être réalisés indépendamment, couvrir tous les IDs et désigner le
 même gagnant ; la marge minimale doit tenir dans les deux passes. Le split DPO est fait

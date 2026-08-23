@@ -374,6 +374,12 @@ downweighted while genuinely dynamic rows are favored. These scales and historie
 checkpointed and old pilot checkpoints resume with neutral scales. The abstention
 verifier applies an accent-free regex to accent-folded text, including common French
 forms such as `déterminer`, `précisé`, `énoncé` and `indéterminable`.
+`constraint_number_only` carries an explicit strict contract: after special-token
+stripping, the visible answer must be exactly one signed integer. Explanations,
+punctuation and marked-number shortcuts such as `donc 121` receive zero reward.
+Checkpoints record the typed-verifier version. Resuming an older checkpoint triggers
+a fixed-dev re-evaluation before any further optimizer update so a stale best score
+cannot survive a stricter verifier.
 
 The frozen reference is intentionally fp32. A real RTX 4060 smoke test measured an
 initial token KL of about **0.96** with a bf16 reference despite identical source

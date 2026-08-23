@@ -14,7 +14,7 @@ from frlm.posttrain_gates_v45 import evaluate_gates
 from frlm.rl_profile_v45 import _summary
 from frlm.rl_v45 import RLVRConfig, RLVRTrainer, _canonical_answer
 from frlm.rl_tasks_v45 import SCHEMAS_BY_CAPABILITY, make_task
-from frlm.verifiers_v45 import AnswerSpec, final_text, verify
+from frlm.verifiers_v45 import VERIFIER_VERSION, AnswerSpec, final_text, verify
 
 
 class VerifierTests(unittest.TestCase):
@@ -24,6 +24,21 @@ class VerifierTests(unittest.TestCase):
         self.assertFalse(verify(AnswerSpec("integer", 12), "12,0").primary_success)
         self.assertEqual(verify(AnswerSpec("integer", 12), "12 puis 3").failure_code,
                          "number_ambiguous")
+
+    def test_number_only_refuse_le_faux_positif_du_step_50(self):
+        spec = AnswerSpec("integer", 121, strict_number_only=True)
+        self.assertTrue(verify(spec, "121").primary_success)
+        bad = ("44 + 77 = 121.\n8 × 15 = 121, donc 121 ÷ 8 = 15\n"
+               "� 8 = 15")
+        result = verify(spec, bad)
+        self.assertFalse(result.primary_success)
+        self.assertEqual(result.failure_code, "number_only_format")
+        self.assertFalse(verify(spec, "Réponse : 121").primary_success)
+        self.assertFalse(verify(spec, "121.").primary_success)
+
+    def test_answer_spec_reste_compatible_avec_les_anciens_payloads(self):
+        spec = AnswerSpec.from_dict({"kind": "integer", "value": 121})
+        self.assertFalse(spec.strict_number_only)
 
     def test_choice_word_boundaries(self):
         spec = AnswerSpec("choice", "Paul", choices=("Paul", "Pauline"))
@@ -113,6 +128,14 @@ class TaskTests(unittest.TestCase):
             self.assertEqual(task.schema_id, schema)
             self.assertTrue(verify(task.answer, _canonical_answer(task)).primary_success)
 
+    def test_constraint_number_only_transporte_le_contrat_strict(self):
+        task = make_task(455_851, "dev", 0.9, "constraints",
+                         "constraint_number_only")
+        self.assertTrue(task.answer.strict_number_only)
+        self.assertEqual(task.verifier_version, VERIFIER_VERSION)
+        self.assertTrue(verify(task.answer, str(task.answer.value)).primary_success)
+        self.assertFalse(verify(task.answer, f"Donc {task.answer.value}.").primary_success)
+
     def test_curriculum_rl_est_pilote_par_le_profil(self):
         trainer = RLVRTrainer.__new__(RLVRTrainer)
         trainer.cfg = RLVRConfig(require_profile=True)
@@ -191,6 +214,28 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(trainer.update, 10)
         self.assertEqual(trainer.frontier_scales, {"frontier": 1.0})
         self.assertEqual(trainer.difficulty, {"reasoning_program": 0.25})
+        self.assertTrue(trainer._resume_revalidate)
+
+    def test_reprise_recalcule_un_meilleur_score_de_verificateur_obsolete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = RLVRTrainer.__new__(RLVRTrainer)
+            trainer.cfg = RLVRConfig(accepted_updates=50)
+            trainer.stage_dir = Path(directory)
+            trainer.run_dir = Path(directory)
+            trainer.baseline_score = 0.067
+            trainer.best_score = 0.533
+            trainer.update = 50
+            trainer._resume_revalidate = True
+            trainer.stop_requested = False
+            trainer.profile = None
+            trainer._evaluate = Mock(return_value={"macro": 31 / 60, "rows": []})
+            trainer._save = Mock()
+            with patch("builtins.print"):
+                trainer.train()
+            self.assertAlmostEqual(trainer.best_score, 31 / 60)
+            self.assertFalse(trainer._resume_revalidate)
+            self.assertTrue((Path(directory) / "eval_resume_000050.json").is_file())
+            trainer._save.assert_called_once_with(best=False)
 
 
 class OfflineRLAIFTests(unittest.TestCase):

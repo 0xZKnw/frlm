@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
-from frlm.verifiers_v45 import AnswerSpec
+from frlm.verifiers_v45 import AnswerSpec, VERIFIER_VERSION
 
 
 Split = Literal["train", "dev"]
@@ -160,7 +160,7 @@ def _reasoning(rng: random.Random, seed: int, split: Split, difficulty: float,
     prompt += " Réponds par la réponse finale, sans recopier l'énoncé."
     return TaskSpec(_task_id(seed, schema, sid, prompt), schema, sid, split,
                     "reasoning_program", difficulty, prompt, answer, program,
-                    tuple(trace), "typed_v45_1", seed, requires_trace=difficulty >= 0.75)
+                    tuple(trace), VERIFIER_VERSION, seed, requires_trace=difficulty >= 0.75)
 
 
 def _grounded(rng: random.Random, seed: int, split: Split, difficulty: float,
@@ -186,7 +186,7 @@ def _grounded(rng: random.Random, seed: int, split: Split, difficulty: float,
     return TaskSpec(_task_id(seed, schema, sid, prompt), schema, sid, split, "grounded",
                     difficulty, prompt, AnswerSpec("integer", value),
                     {"op": "extract", "field": field, "context_sha256": hashlib.sha256(context.encode()).hexdigest()},
-                    (f"Le champ {field} vaut {value}.",), "typed_v45_1", seed)
+                    (f"Le champ {field} vaut {value}.",), VERIFIER_VERSION, seed)
 
 
 def _constraints(rng: random.Random, seed: int, split: Split, difficulty: float,
@@ -199,7 +199,7 @@ def _constraints(rng: random.Random, seed: int, split: Split, difficulty: float,
         raise ValueError(f"schéma constraints inconnu : {forced_schema}")
     if number_only:
         prompt = f"Combien font {a} + {b} ? Réponds uniquement par le nombre."
-        answer = AnswerSpec("integer", total)
+        answer = AnswerSpec("integer", total, strict_number_only=True)
         schema, program = "constraint_number_only", {"op": "add", "args": [a, b], "format": "number"}
     else:
         value = {"operation": "addition", "resultat": total}
@@ -210,7 +210,7 @@ def _constraints(rng: random.Random, seed: int, split: Split, difficulty: float,
     sid = f"{split}:{rng.randrange(3 if split == 'train' else 2)}"
     return TaskSpec(_task_id(seed, schema, sid, prompt), schema, sid, split, "constraints",
                     difficulty, prompt, answer, program, (f"{a} + {b} = {total}",),
-                    "typed_v45_1", seed)
+                    VERIFIER_VERSION, seed)
 
 
 def _uncertainty(rng: random.Random, seed: int, split: Split, difficulty: float,
@@ -227,7 +227,7 @@ def _uncertainty(rng: random.Random, seed: int, split: Split, difficulty: float,
     return TaskSpec(_task_id(seed, "contradictory_sources", sid, prompt), "contradictory_sources",
                     sid, split, "uncertainty", difficulty, prompt, AnswerSpec("abstain"),
                     {"op": "unanswerable", "reason": "equal_authority_contradiction"},
-                    ("Les deux sources de même autorité se contredisent.",), "typed_v45_1", seed)
+                    ("Les deux sources de même autorité se contredisent.",), VERIFIER_VERSION, seed)
 
 
 def _state(rng: random.Random, seed: int, split: Split, difficulty: float,
@@ -247,7 +247,7 @@ def _state(rng: random.Random, seed: int, split: Split, difficulty: float,
                     AnswerSpec("choice", third, choices=colors),
                     {"op": "last_write_wins", "values": [first, second, third]},
                     (f"La dernière mise à jour remplace {second} par {third}.",),
-                    "typed_v45_1", seed)
+                    VERIFIER_VERSION, seed)
 
 
 def _code(rng: random.Random, seed: int, split: Split, difficulty: float,
@@ -273,7 +273,7 @@ def _code(rng: random.Random, seed: int, split: Split, difficulty: float,
     answer = AnswerSpec("code", function_name=name, tests=tests)
     return TaskSpec(_task_id(seed, f"code_{kind}", sid, prompt), f"code_{kind}", sid,
                     split, "code", difficulty, prompt, answer,
-                    {"op": "python_tests", "function": name}, (), "typed_v45_1", seed)
+                    {"op": "python_tests", "function": name}, (), VERIFIER_VERSION, seed)
 
 
 def make_task(seed: int, split: Split = "train", difficulty: float = 0.35,
