@@ -360,6 +360,21 @@ python run.py rl-v45 --run fr-v4-v45-sft --data-dir data-v4 \
   --updates 200 --resume latest
 ```
 
+The first 10-update RTX 4060 pilot improved the fixed 60-task greedy macro from
+**0.067 (4/60)** to **0.183 (11/60)** with no lost baseline success. Code moved
+from 0/10 to 7/10, grounded stayed at 4/10, and final KL was 0.0058. This validates
+the local optimizer and checkpoint path, but does not yet demonstrate a reasoning
+gain: the other four capabilities remained at zero.
+
+Only `reasoning_program` exposes a real scalar difficulty in its generator. Its
+difficulty continues to adapt after 20 observations. Every other measured frontier
+instead keeps an online success history and updates its sampling scale after 12
+observations using the observed `p(1-p)` utility; saturated and unreachable rows are
+downweighted while genuinely dynamic rows are favored. These scales and histories are
+checkpointed and old pilot checkpoints resume with neutral scales. The abstention
+verifier applies an accent-free regex to accent-folded text, including common French
+forms such as `déterminer`, `précisé`, `énoncé` and `indéterminable`.
+
 The frozen reference is intentionally fp32. A real RTX 4060 smoke test measured an
 initial token KL of about **0.96** with a bf16 reference despite identical source
 weights, versus **0.00084** in fp32. The generic bf16-memory recommendation from the

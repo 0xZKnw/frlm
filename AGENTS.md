@@ -179,6 +179,18 @@ profil. Ces derniers reçoivent aussi un bridge supervisé canonique dans le rep
 profil diffère, et ne pas remplacer ce curriculum par un tirage uniforme sans nouvelle
 mesure pass@k.
 
+Seul `reasoning_program` possède une difficulté scalaire réellement utilisée par le
+générateur. Pour les autres capacités, adapter en ligne le poids de chaque ligne
+frontière à partir de son taux de succès observé ; conserver échelles et historiques
+dans les checkpoints. Le pilote local de 10 updates a fait passer la macro dev fixe de
+0,067 (4/60) à 0,183 (11/60), entièrement grâce au code (0/10 vers 7/10), avec KL finale
+0,0058 et aucune réussite initiale perdue. Ne pas présenter ce pilote comme un gain de
+raisonnement : quatre capacités restent à zéro.
+
+`verify(..., kind="abstain")` applique le regex après suppression Unicode des accents :
+le motif doit donc rester intégralement non accentué. Tester à la fois les formulations
+accentuées et non accentuées lors de toute modification.
+
 Le RLAIF v4.5 produit deux paquets aveugles A/B dont l'ordre des candidats est inversé.
 Les jugements doivent être réalisés indépendamment, couvrir tous les IDs et désigner le
 même gagnant ; la marge minimale doit tenir dans les deux passes. Le split DPO est fait

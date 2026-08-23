@@ -63,9 +63,10 @@ _MARKED_NUMBER_RE = re.compile(
     re.IGNORECASE,
 )
 _ABSTAIN_RE = re.compile(
-    r"\b(?:impossible (?:de|à)|ne (?:peut|peux) pas (?:savoir|déterminer)|"
-    r"pas (?:précisé|indiqué|fourni)|information(?:s)? (?:insuffisante|manquante)s?|"
-    r"le (?:texte|contexte|énoncé) ne (?:dit|permet) pas|indéterminable|"
+    r"\b(?:impossible (?:de|a)|ne (?:peut|peux) pas (?:savoir|determiner)|"
+    r"pas (?:precise|indique|fourni)|information(?:s)? (?:est |sont )?"
+    r"(?:insuffisante|manquante)s?|"
+    r"le (?:texte|contexte|enonce) ne (?:dit|permet) pas|indeterminable|"
     r"les informations se contredisent|aucune information)\b",
     re.IGNORECASE,
 )

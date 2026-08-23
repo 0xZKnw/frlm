@@ -32,6 +32,9 @@ from frlm.rl_tasks_v45 import CAPABILITY_WEIGHTS, SCHEMAS_BY_CAPABILITY, TaskSpe
 from frlm.verifiers_v45 import final_text, verify
 
 
+DIFFICULTY_AWARE_CAPABILITIES = {"reasoning_program"}
+
+
 @dataclass
 class RLVRConfig:
     run_name: str = "fr-v4-v45-sft"
@@ -174,8 +177,18 @@ class RLVRTrainer:
         self.kl_beta = cfg.kl_beta
         self.best_score = -1.0
         self.baseline_score = None
-        self.difficulty = {capability: 0.25 for capability in CAPABILITY_WEIGHTS}
-        self.cap_history = {capability: deque(maxlen=40) for capability in CAPABILITY_WEIGHTS}
+        # Seul reasoning_program possède une difficulté sémantique graduelle.
+        # Les autres familles adaptent directement le poids de leurs frontières.
+        self.difficulty = {capability: 0.25
+                           for capability in DIFFICULTY_AWARE_CAPABILITIES}
+        self.cap_history = {capability: deque(maxlen=40)
+                            for capability in DIFFICULTY_AWARE_CAPABILITIES}
+        self.frontier_scales = {row["key"]: 1.0 for row in self.frontier_specs}
+        self.frontier_history = {row["key"]: deque(maxlen=24)
+                                 for row in self.frontier_specs}
+        self.frontier_base_weights = {row["key"]: float(row["weight"])
+                                      for row in self.frontier_specs}
+        self._last_frontier_key: str | None = None
         self.stop_requested = False
         self.metrics_path = self.stage_dir / "metrics.jsonl"
         if resume:
@@ -187,7 +200,9 @@ class RLVRTrainer:
                         "frontier_schemas": sorted({row["schema_id"]
                                                     for row in self.frontier_specs}),
                         "bridge_schemas": sorted({row["schema_id"]
-                                                  for row in self.bridge_specs})},
+                                                  for row in self.bridge_specs}),
+                        "adaptive_frontiers": len(self.frontier_specs),
+                        "semantic_difficulty": sorted(DIFFICULTY_AWARE_CAPABILITIES)},
                        ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
@@ -216,6 +231,7 @@ class RLVRTrainer:
             if 0 < successes < measured_k:
                 probability = successes / measured_k
                 frontier.append({
+                    "key": row["task_id"],
                     "capability": row["capability"], "schema_id": row["schema_id"],
                     "difficulty": float(row["difficulty"]),
                     "weight": max(0.02, probability * (1.0 - probability)),
@@ -247,6 +263,10 @@ class RLVRTrainer:
             "tokens_generated": self.tokens_generated, "kl_beta": self.kl_beta,
             "best_score": self.best_score, "baseline_score": self.baseline_score,
             "difficulty": self.difficulty, "profile_sha256": self.profile_sha256,
+            "frontier_scales": self.frontier_scales,
+            "frontier_history": {key: list(history)
+                                 for key, history in self.frontier_history.items()},
+            "cap_history": {key: list(history) for key, history in self.cap_history.items()},
             "rng": {"python": self.rng.getstate(), "torch": torch.get_rng_state(),
                     "cuda": torch.cuda.get_rng_state_all() if self.use_cuda else None,
                     "numpy": np.random.get_state()},
@@ -278,7 +298,19 @@ class RLVRTrainer:
         self.kl_beta = float(checkpoint.get("kl_beta", self.cfg.kl_beta))
         self.best_score = float(checkpoint.get("best_score", -1.0))
         self.baseline_score = checkpoint.get("baseline_score")
-        self.difficulty.update(checkpoint.get("difficulty", {}))
+        saved_difficulty = checkpoint.get("difficulty", {})
+        for capability in DIFFICULTY_AWARE_CAPABILITIES:
+            if capability in saved_difficulty:
+                self.difficulty[capability] = float(saved_difficulty[capability])
+        for key, value in checkpoint.get("frontier_scales", {}).items():
+            if key in self.frontier_scales:
+                self.frontier_scales[key] = float(value)
+        for key, values in checkpoint.get("frontier_history", {}).items():
+            if key in self.frontier_history:
+                self.frontier_history[key].extend(float(value) for value in values)
+        for key, values in checkpoint.get("cap_history", {}).items():
+            if key in self.cap_history:
+                self.cap_history[key].extend(float(value) for value in values)
         rng = checkpoint.get("rng", {})
         if rng.get("python") is not None:
             self.rng.setstate(rng["python"])
@@ -293,22 +325,26 @@ class RLVRTrainer:
         print(f"[i] Reprise RLVR v4.5 : {path.name}, update {self.update}")
 
     def _next_task(self) -> TaskSpec:
+        self._last_frontier_key = None
         if self.frontier_specs and (not self.bridge_specs or self.rng.random() >= 0.20):
             spec = self.rng.choices(
                 self.frontier_specs,
-                weights=[row["weight"] for row in self.frontier_specs], k=1,
+                weights=[row["weight"] * self.frontier_scales.get(row["key"], 1.0)
+                         for row in self.frontier_specs], k=1,
             )[0]
+            self._last_frontier_key = spec["key"]
         elif self.bridge_specs:
             spec = self.rng.choice(self.bridge_specs)
         else:
             names, weights = zip(*CAPABILITY_WEIGHTS.items())
             capability = self.rng.choices(names, weights=weights, k=1)[0]
             spec = {"capability": capability, "schema_id": None,
-                    "difficulty": self.difficulty[capability]}
+                    "difficulty": self.difficulty.get(capability, 0.25)}
         capability = spec["capability"]
         seed = self.cfg.seed + 1_000_000 + self.rollout_index * 31
         self.rollout_index += 1
-        offset = self.difficulty[capability] - 0.25
+        offset = (self.difficulty[capability] - 0.25
+                  if capability in DIFFICULTY_AWARE_CAPABILITIES else 0.0)
         difficulty = max(0.05, min(0.95, float(spec["difficulty"]) + offset))
         return make_task(seed, "train", difficulty, capability, spec["schema_id"])
 
@@ -347,7 +383,11 @@ class RLVRTrainer:
                 stats["tokens"] += len(sample.token_ids)
                 stats["entropy"] += sample.entropy
             primary_count = sum(successes)
-            self.cap_history[task.capability].append(primary_count / self.cfg.group_size)
+            success_rate = primary_count / self.cfg.group_size
+            if task.capability in self.cap_history:
+                self.cap_history[task.capability].append(success_rate)
+            if self._last_frontier_key in self.frontier_history:
+                self.frontier_history[self._last_frontier_key].append(success_rate)
             if primary_count == 0:
                 needs_sft.append({"task": task.to_dict(), "failure_codes": failures})
             if 0 < primary_count < self.cfg.group_size:
@@ -370,6 +410,15 @@ class RLVRTrainer:
                 self.difficulty[capability] = min(0.95, self.difficulty[capability] + 0.05)
             elif rate < 0.08:
                 self.difficulty[capability] = max(0.05, self.difficulty[capability] - 0.05)
+            history.clear()
+        for key, history in self.frontier_history.items():
+            if len(history) < 12:
+                continue
+            rate = sum(history) / len(history)
+            observed_utility = max(0.005, rate * (1.0 - rate))
+            base_utility = max(0.005, self.frontier_base_weights[key])
+            desired = max(0.25, min(4.0, observed_utility / base_utility))
+            self.frontier_scales[key] = 0.5 * self.frontier_scales[key] + 0.5 * desired
             history.clear()
 
     def _make_microbatches(self, groups):
@@ -519,6 +568,8 @@ class RLVRTrainer:
             bridge = ", ".join(sorted({row["schema_id"] for row in self.bridge_specs}))
             print(f"[i] Curriculum profilé · 80 % frontière [{frontier}] · "
                   f"20 % exploration bridge [{bridge}]")
+            print(f"[i] Adaptation en ligne · {len(self.frontier_specs)} frontières pondérées · "
+                  "difficulté sémantique : reasoning_program")
 
         def stop(_signum, _frame):
             self.stop_requested = True
@@ -552,7 +603,9 @@ class RLVRTrainer:
                 "mean_entropy": rollout["entropy"] / max(1, rollout["samples"]),
                 "mean_length": rollout["tokens"] / max(1, rollout["samples"]),
                 "tokens_generated": self.tokens_generated, "kl_beta": self.kl_beta,
-                "difficulty": dict(self.difficulty), "elapsed_s": time.time() - started,
+                "difficulty": dict(self.difficulty),
+                "frontier_scales": dict(self.frontier_scales),
+                "elapsed_s": time.time() - started,
                 **train_stats,
             }
             is_best = False

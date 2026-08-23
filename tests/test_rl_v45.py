@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from collections import deque
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from frlm.dpo_v45 import _load_pairs
 from frlm.rlaif_offline_v45 import _read_prompts, import_scores
@@ -33,7 +34,15 @@ class VerifierTests(unittest.TestCase):
 
     def test_abstention(self):
         spec = AnswerSpec("abstain")
-        self.assertTrue(verify(spec, "Le contexte ne permet pas de le déterminer.").primary_success)
+        accepted = (
+            "Le contexte ne permet pas de le déterminer.",
+            "Impossible à déterminer avec les informations fournies.",
+            "Ce n'est pas précisé dans l'énoncé.",
+            "Les informations sont insuffisantes.",
+            "C'est indéterminable : les deux sources se contredisent.",
+        )
+        for answer in accepted:
+            self.assertTrue(verify(spec, answer).primary_success, answer)
         self.assertFalse(verify(spec, "Je pense que la réponse est 4.").primary_success)
 
     def test_json_schema(self):
@@ -126,8 +135,9 @@ class TaskTests(unittest.TestCase):
         self.assertNotIn("grounded_year", bridge_schemas)
 
         trainer.frontier_specs, trainer.bridge_specs = frontier, bridge
+        trainer.frontier_scales = {row["key"]: 1.0 for row in frontier}
         trainer.rng = random.Random(45)
-        trainer.difficulty = {capability: 0.25 for capability in SCHEMAS_BY_CAPABILITY}
+        trainer.difficulty = {"reasoning_program": 0.25}
         trainer.rollout_index = 0
         sampled = [trainer._next_task().schema_id for _ in range(100)]
         self.assertGreaterEqual(sum(schema in {"code_1", "linear_equation"}
@@ -143,15 +153,44 @@ class TaskTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             trainer._profile_curriculum()
 
-    def test_curriculum_difficulte_s_active_des_20_observations(self):
+    def test_curriculum_adapte_raisonnement_et_poids_frontiere(self):
         trainer = RLVRTrainer.__new__(RLVRTrainer)
-        trainer.difficulty = {capability: 0.25 for capability in SCHEMAS_BY_CAPABILITY}
-        trainer.cap_history = {capability: deque(maxlen=40)
-                               for capability in SCHEMAS_BY_CAPABILITY}
-        trainer.cap_history["code"].extend([0.0] * 20)
+        trainer.difficulty = {"reasoning_program": 0.25}
+        trainer.cap_history = {"reasoning_program": deque([0.0] * 20, maxlen=40)}
+        trainer.frontier_history = {"frontier": deque([0.5] * 12, maxlen=24)}
+        trainer.frontier_base_weights = {"frontier": 0.05}
+        trainer.frontier_scales = {"frontier": 1.0}
         trainer._adjust_curriculum()
-        self.assertEqual(trainer.difficulty["code"], 0.20)
-        self.assertFalse(trainer.cap_history["code"])
+        self.assertEqual(trainer.difficulty["reasoning_program"], 0.20)
+        self.assertFalse(trainer.cap_history["reasoning_program"])
+        self.assertGreater(trainer.frontier_scales["frontier"], 1.0)
+        self.assertFalse(trainer.frontier_history["frontier"])
+
+    def test_reprise_checkpoint_pilote_sans_etat_frontiere(self):
+        trainer = RLVRTrainer.__new__(RLVRTrainer)
+        trainer.cfg = RLVRConfig()
+        trainer.run_dir = Path("unused")
+        trainer.profile_sha256 = "profile"
+        trainer.model, trainer.optimizer = Mock(), Mock()
+        trainer.use_cuda = False
+        trainer.rng = random.Random(1)
+        trainer.difficulty = {"reasoning_program": 0.25}
+        trainer.frontier_scales = {"frontier": 1.0}
+        trainer.frontier_history = {"frontier": deque(maxlen=24)}
+        trainer.cap_history = {"reasoning_program": deque(maxlen=40)}
+        checkpoint = {
+            "stage": "rlvr-v45", "profile_sha256": "profile", "model": {},
+            "optimizers": [{}], "accepted_updates": 10, "rollout_index": 65,
+            "tokens_generated": 14156, "kl_beta": 0.0035, "best_score": 0.183,
+            "baseline_score": 0.067,
+            "difficulty": {"reasoning_program": 0.25, "code": 0.20}, "rng": {},
+        }
+        with patch("frlm.rl_v45.resolve_checkpoint", return_value=Path("pilot.pt")), \
+                patch("frlm.rl_v45.torch.load", return_value=checkpoint):
+            trainer._resume("latest")
+        self.assertEqual(trainer.update, 10)
+        self.assertEqual(trainer.frontier_scales, {"frontier": 1.0})
+        self.assertEqual(trainer.difficulty, {"reasoning_program": 0.25})
 
 
 class OfflineRLAIFTests(unittest.TestCase):
