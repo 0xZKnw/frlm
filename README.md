@@ -243,6 +243,24 @@ sentence correctly says `Tom`. The corrected total is therefore **8/40**. No aut
 false positive was found in that run. This is a clear improvement over v4.1 MID
 (3/40 automatic) and the v4.1/v4.2 SFT checkpoints (3-4/40 automatic).
 
+The same local report also contains modern models in the same parameter class. Base
+models use the benchmark few-shot prompt; the RL/instruct model uses its chat template.
+Competitor values below are the report's automatic scores, while the frlm row includes
+the one manually verified correction described above.
+
+| model | stage | transitif | piège | intervalle | branches | reste | cycle | composition | OOD v2 | facts |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **frlm v4.3 · 229M** | **MID, step 11444** | **2/6** | 0/6 | 1/6 | **3/5** | 0/5 | **2/5** | 0/7 | **8/40 manual** (7 auto) | 6/12 |
+| Gemma 3 · 270M | base | 2/6 | **2/6** | 0/6 | 2/5 | 0/5 | 1/5 | 0/7 | **7/40 auto** | 6/12 |
+| LFM2.5 · 230M | base, 28T tokens | 2/6 | 1/6 | 1/6 | 2/5 | 0/5 | 1/5 | 1/7 | **8/40 auto** | **7/12** |
+| LFM2.5 · 230M | RL/instruct, 28T tokens | **3/6** | 1/6 | 1/6 | 2/5 | 0/5 | 1/5 | **4/7** | **12/40 auto** | **7/12** |
+
+This puts the **MID-only** frlm checkpoint level with LFM2.5 Base on the corrected
+total and one point above Gemma 3 on this small benchmark, before v4.5 SFT or RL.
+The 40 questions are too few for a general leaderboard claim; every answer remains
+auditable in `bench/reports/bench_ood_v2_fr-v3.md` and
+`bench/reports/bench_ood_v2_fr-v4-v43_mid_latest.md`.
+
 | checkpoint | automatic OOD v2 | facts | observation |
 |---|---:|---:|---|
 | v4.1 MID, step 6000 | 3/40 | 8/12 | older 404M-token curriculum |
