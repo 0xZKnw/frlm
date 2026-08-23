@@ -41,7 +41,8 @@ image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install("torch", "numpy", "tokenizers", "rich", "nvidia-ml-py",
                  "datasets>=2.19", "tqdm>=4.66")
-    .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
+    .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+          "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"})
     .add_local_dir(".", remote_path="/root/app",
                    ignore=["data*/**", "runs/**", ".git/**", "**/__pycache__/**",
                            "*.bin", "*.pt"])
@@ -104,20 +105,40 @@ def _required_files(cmd: str, root: Path = Path("/root/app")) -> tuple[str | Non
 
     data_dir = _workspace_path(_arg(parts, "--data-dir", "data") or "data", root)
     curriculum = _arg(parts, "--mid-curriculum", "") or ""
+    sft_recipe = (_arg(parts, "--sft-recipe", "") or "").casefold().replace("v", "").replace(".", "")
     if stage == "mid" and curriculum:
         required = [data_dir / "tokenizer.json",
                     data_dir / "mid_v43_stage1_train.bin",
                     data_dir / "mid_v43_stage2_train.bin",
                     data_dir / "mid_v43_val.bin"]
+    elif stage == "sft" and sft_recipe in ("44", "45"):
+        prefix = f"sft_v{sft_recipe}"
+        required = [data_dir / "tokenizer.json", data_dir / "sft_v44_train.bin",
+                    data_dir / "sft_v44_val.bin"] if sft_recipe == "44" else [
+                        data_dir / "tokenizer.json", data_dir / f"{prefix}_train.bin",
+                        data_dir / f"{prefix}_val.bin",
+                    ]
     else:
         prefix = {"train": "", "mid": "mid_", "sft": "sft_"}[stage]
         required = [data_dir / "tokenizer.json", data_dir / f"{prefix}train.bin",
                     data_dir / f"{prefix}val.bin"]
     if stage == "sft":
-        required += [data_dir / "sft_train.mask", data_dir / "sft_val.mask"]
+        mask_prefix = f"sft_v{sft_recipe}" if sft_recipe in ("44", "45") else "sft"
+        required += [data_dir / f"{mask_prefix}_train.mask",
+                     data_dir / f"{mask_prefix}_val.mask"]
         replay_frac = float(_arg(parts, "--replay-frac", "0") or "0")
         if replay_frac > 0:
-            required += [data_dir / "mid_train.bin", data_dir / "mid_val.bin"]
+            replay_mix = _arg(parts, "--replay-mix", "") or ""
+            if replay_mix:
+                for item in replay_mix.split(","):
+                    replay_path = Path(item.rsplit("=", 1)[0].strip())
+                    required.append(replay_path if replay_path.is_absolute()
+                                    else data_dir / replay_path)
+                replay_val = Path(_arg(parts, "--replay-val", "val.bin") or "val.bin")
+                required.append(replay_val if replay_val.is_absolute()
+                                else data_dir / replay_val)
+            else:
+                required += [data_dir / "mid_train.bin", data_dir / "mid_val.bin"]
     return stage, required, _resume_candidates(parts, stage, root)
 
 
@@ -159,7 +180,16 @@ def _check_command(cmd: str) -> None:
         meta_path = data_dir / "meta.json"
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            if stage == "sft" and (meta.get("sft") or {}).get("recipe") != "v4.2-quality-replay":
+            sft_recipe = (_arg(shlex.split(cmd), "--sft-recipe", "") or "")
+            sft_recipe = sft_recipe.casefold().replace("v", "").replace(".", "")
+            if stage == "sft" and sft_recipe in ("44", "45"):
+                expected_recipe = {
+                    "44": "v4.4-balanced-capabilities-18m",
+                    "45": "v4.5-audited-isolated-24m",
+                }[sft_recipe]
+                if (meta.get(f"sft_v{sft_recipe}") or {}).get("recipe") != expected_recipe:
+                    raise ValueError(f"meta.json ne décrit pas la recette SFT v4.{sft_recipe[-1]}")
+            elif stage == "sft" and (meta.get("sft") or {}).get("recipe") != "v4.2-quality-replay":
                 raise ValueError("meta.json ne décrit pas la recette v4.2-quality-replay")
             curriculum = _arg(shlex.split(cmd), "--mid-curriculum", "") or ""
             if stage == "mid" and curriculum:
@@ -173,6 +203,19 @@ def _check_command(cmd: str) -> None:
                 expected[data_dir / section["validation"]["path"]] = (
                     int(section["validation"]["val_tokens"]) * 2
                 )
+            elif stage == "sft" and sft_recipe in ("44", "45"):
+                section = meta[f"sft_v{sft_recipe}"]
+                expected = {
+                    data_dir / section["train_path"]: int(section["train_tokens"]) * 2,
+                    data_dir / section["val_path"]: int(section["val_tokens"]) * 2,
+                }
+                for capability in section["capabilities"].values():
+                    train_path = data_dir / capability["train_path"]
+                    val_path = data_dir / capability["val_path"]
+                    expected[train_path] = int(capability["train_tokens"]) * 2
+                    expected[train_path.with_suffix(".mask")] = int(capability["train_tokens"])
+                    expected[val_path] = int(capability["val_tokens"]) * 2
+                    expected[val_path.with_suffix(".mask")] = int(capability["val_tokens"])
             else:
                 section = meta["midtrain"] if stage == "mid" else meta["sft"]
                 expected = {
@@ -197,7 +240,7 @@ def _check_command(cmd: str) -> None:
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError(
                 f"Préflight Modal échoué : les données {stage} du Volume sont anciennes "
-                f"ou incohérentes ({exc}). Réuploade les bins, masks et meta.json v4.2 ; "
+                f"ou incohérentes ({exc}). Réuploade les bins, masks et meta.json adaptés ; "
                 "aucun GPU n'a été alloué."
             ) from exc
     if required:

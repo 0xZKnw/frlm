@@ -611,6 +611,10 @@ _INVENTED_PERSONA_RE = re.compile(
     r"\bje m['’]appelle\s+[A-ZÀ-ÖØ-Ý][\wÀ-ÿ-]+|\bj['’]ai\s+\d{1,3}\s+ans\b",
     re.IGNORECASE,
 )
+_UNWANTED_ASSISTANT_RE = re.compile(
+    r"\b(?:salope|connard|connasse|putain|enculé|encule|pute|merde)\b",
+    re.IGNORECASE,
+)
 
 
 def _prompt_fingerprint(messages: list[dict]) -> bytes:
@@ -628,9 +632,11 @@ def _repetition_ratio(text: str, n: int = 4) -> float:
     return 1.0 - len(set(grams)) / max(1, len(grams))
 
 
-def _prepare_sft_messages(record: dict, source: str) -> tuple[list[dict] | None, bytes | None, str | None]:
+def _prepare_sft_messages(record: dict, source: str,
+                          recipe: dict[str, dict] | None = None
+                          ) -> tuple[list[dict] | None, bytes | None, str | None]:
     """Nettoie un exemple et écarte les identités/personas contradictoires."""
-    cfg = SFT_RECIPE.get(source)
+    cfg = (recipe or SFT_RECIPE).get(source)
     messages = record.get("m")
     if cfg is None or not isinstance(messages, list):
         return None, None, "messages_absents"
@@ -667,6 +673,8 @@ def _prepare_sft_messages(record: dict, source: str) -> tuple[list[dict] | None,
                 return None, None, "reponse_trop_longue"
             if _repetition_ratio(final) > 0.35:
                 return None, None, "repetition"
+            if _UNWANTED_ASSISTANT_RE.search(final):
+                return None, None, "contenu_grossier"
             if source != "identity" and _FOREIGN_ASSISTANT_RE.search(final):
                 return None, None, "identite_etrangere"
             if source in ("chat_human", "oasst_fr", "croissant") and _INVENTED_PERSONA_RE.search(final):
@@ -927,6 +935,122 @@ class BinCorpus:
             if mt is not None:
                 mt = mt.to(device)
         return xt, yt, mt
+
+
+class ConversationCorpus(BinCorpus):
+    """SFT sans fuite entre conversations, avec padding EOT non supervisé.
+
+    Chaque ligne contient exactement un document complet. Contrairement à une
+    fenêtre prise dans le flux concaténé, ni l'attention causale ni la convolution
+    Canon ne peuvent transporter d'information depuis la conversation précédente.
+    Les builders doivent garantir ``longueur_document <= seq_len + 1``.
+    """
+
+    def __init__(self, bin_path: str | Path, seq_len: int):
+        self.path = Path(bin_path)
+        self.tokens = np.memmap(self.path, dtype=DTYPE, mode="r")
+        mask_path = self.path.with_suffix(".mask")
+        self.mask = (np.memmap(mask_path, dtype=np.uint8, mode="r")
+                     if mask_path.exists() else None)
+        self.seq_len = seq_len
+        self.n_tokens = len(self.tokens)
+        self.doc_starts = None
+        if self.mask is None:
+            raise ValueError(f"masque SFT absent pour {bin_path}")
+        if len(self.mask) != self.n_tokens:
+            raise ValueError(f"taille mask incohérente pour {bin_path}")
+
+        eot_positions: list[np.ndarray] = []
+        chunk_size = 10_000_000
+        for start in range(0, self.n_tokens, chunk_size):
+            chunk = np.asarray(self.tokens[start:start + chunk_size])
+            eot_positions.append(np.flatnonzero(chunk == 0).astype(np.int64) + start)
+        ends = np.concatenate(eot_positions) + 1 if eot_positions else np.empty(0, np.int64)
+        starts = np.concatenate((np.array([0], dtype=np.int64), ends[:-1]))
+        lengths = ends - starts
+        valid = (lengths >= 2) & (lengths <= seq_len + 1)
+        self.conversation_starts = starts[valid]
+        self.conversation_ends = ends[valid]
+        self.dropped_too_long = int(np.count_nonzero(lengths > seq_len + 1))
+        if not len(self.conversation_starts):
+            raise ValueError(f"aucune conversation complète <= {seq_len + 1} tokens dans {bin_path}")
+
+    def get_batch(self, step: int, batch_size: int, seed: int = 1337,
+                  device: str = "cuda"):
+        import torch
+
+        rng = np.random.default_rng(seed * 1_000_003 + step)
+        selected = rng.integers(0, len(self.conversation_starts), size=batch_size)
+        tokens = np.zeros((batch_size, self.seq_len + 1), dtype=np.int64)
+        masks = np.zeros((batch_size, self.seq_len + 1), dtype=np.uint8)
+        for row, index in enumerate(selected):
+            start = int(self.conversation_starts[index])
+            end = int(self.conversation_ends[index])
+            length = end - start
+            tokens[row, :length] = self.tokens[start:end]
+            masks[row, :length] = self.mask[start:end]
+
+        xt = torch.from_numpy(tokens[:, :-1])
+        yt = torch.from_numpy(tokens[:, 1:])
+        mt = torch.from_numpy(masks[:, 1:])
+        if device.startswith("cuda"):
+            xt = xt.pin_memory().to(device, non_blocking=True)
+            yt = yt.pin_memory().to(device, non_blocking=True)
+            mt = mt.pin_memory().to(device, non_blocking=True)
+        else:
+            xt, yt, mt = xt.to(device), yt.to(device), mt.to(device)
+        return xt, yt, mt
+
+
+class SourceMixtureCorpus:
+    """Échantillonne explicitement plusieurs bins avec des probabilités stables.
+
+    Le builder SFT v4.4 conserve un bin par capacité. Ce chargeur empêche la taille
+    moyenne des conversations de modifier silencieusement le mix : chaque ligne du
+    batch choisit d'abord une capacité, puis un document dans son corpus.
+    """
+
+    def __init__(self, corpora: list[tuple[str, BinCorpus, float]]):
+        if not corpora:
+            raise ValueError("SourceMixtureCorpus exige au moins un corpus")
+        self.names = [name for name, _, _ in corpora]
+        self.corpora = [corpus for _, corpus, _ in corpora]
+        weights = np.asarray([weight for _, _, weight in corpora], dtype=np.float64)
+        if np.any(weights < 0) or not np.isfinite(weights).all() or weights.sum() <= 0:
+            raise ValueError("poids de mélange invalides")
+        self.weights = weights / weights.sum()
+        self.seq_len = self.corpora[0].seq_len
+        if any(corpus.seq_len != self.seq_len for corpus in self.corpora):
+            raise ValueError("tous les corpus du mélange doivent partager seq_len")
+        self.n_tokens = sum(len(corpus) for corpus in self.corpora)
+
+    def __len__(self):
+        return self.n_tokens
+
+    def get_batch(self, step: int, batch_size: int, seed: int = 1337,
+                  device: str = "cuda"):
+        import torch
+
+        rng = np.random.default_rng(seed * 1_000_003 + step)
+        selected = rng.choice(len(self.corpora), size=batch_size, p=self.weights)
+        xs, ys, masks = [], [], []
+        has_mask = None
+        for index, corpus in enumerate(self.corpora):
+            count = int(np.count_nonzero(selected == index))
+            if count == 0:
+                continue
+            x, y, mask = corpus.get_batch(
+                step * 101 + index, count, seed=seed + index * 10_007, device=device
+            )
+            xs.append(x)
+            ys.append(y)
+            masks.append(mask)
+            current = mask is not None
+            has_mask = current if has_mask is None else has_mask
+            if current != has_mask:
+                raise ValueError("un mélange ne peut pas combiner masks présents et absents")
+        return (torch.cat(xs, dim=0), torch.cat(ys, dim=0),
+                torch.cat(masks, dim=0) if has_mask else None)
 
 
 # --------------------------------------------------------------------------------------

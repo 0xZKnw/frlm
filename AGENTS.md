@@ -108,6 +108,44 @@ exclut explicitement les prompts/seeds OOD et inscrit les licences/provenances d
 `meta.json`. Elle inclut CQuAE sous CC-BY-NC-4.0 : ne pas présenter le modèle dérivé
 comme commercial ni publier les corpus bruts sans revue de licence.
 
+Pour préparer le SFT v4.4 équilibré sans modifier les bins précédents :
+
+```powershell
+python run.py prepare-sft-v44 --data-dir data-v4 --target-supervised 18e6 --seq-len 2048
+python run.py sft --data-dir data-v4 --run fr-v4-v44-sft-lr1e4 --preset v4-base --sft-recipe v4.4 --seq-len 2048 --batch-size 16 --grad-accum 4 --max-steps 120 --optimizer adamw --lr 1e-4 --weight-decay 0.01 --schedule cosine --warmup 20 --min-lr-frac 0.10 --replay-frac 0.15 --replay-mix "mid_v43_stage1_train.bin=0.80,mid_v43_stage2_train.bin=0.20" --replay-val mid_v43_val.bin --eval-every 25 --eval-iters 48 --sample-every 25 --save-every 25 --keep-last 8 --resume runs/fr-v4-v43/mid/ckpt_latest.pt
+```
+
+La v4.4 alloue strictement 18M tokens assistant par capacités, sans redistribution
+inter-capacité : 25 % chat français natif, 20 % distillation, 30 % raisonnement
+vérifié, 12 % QA ancrée, 8 % contraintes/calibration et 5 % multi-tour/identité.
+OpenHermes-FR est plafonné à 15 %, GSM8K-FR à 3 %, toute source à 20 % et les
+shortfalls restent visibles. Le trainer échantillonne les bins par capacité et le
+replay conseillé mélange 70 % de prétrain propre avec 30 % du mid v4.3. Comparer
+d'abord trois pilotes de 120 pas à 3e-5, 1e-4 et 3e-4 ; le full SFT de 300-450 pas
+ne part que du meilleur pilote.
+
+Le SFT v4.4 enseigne volontairement des compétences structurelles proches des
+familles OOD v2. Exécuter OOD v2 sur le mid avant SFT, puis utiliser les splits
+retenus par schéma/surface et un nouveau benchmark scellé pour mesurer le SFT.
+
+Le pilote v4.4 ne doit pas servir de recette finale : il a révélé que les fenêtres
+concaténées traversaient les conversations et que l'accumulation pondérait chaque
+microbatch également. La v4.5 corrige ces deux défauts et reprend uniquement le MID
+v4.3 final au step 11444 :
+
+```powershell
+python run.py prepare-sft-v45 --data-dir data-v4 --target-supervised 24e6 --seq-len 512 --seed 451337
+python run.py sft --data-dir data-v4 --run fr-v4-v45-sft --preset v4-base --sft-recipe v4.5 --seq-len 512 --batch-size 128 --grad-accum 12 --max-steps 720 --optimizer adamw --lr 2e-5 --weight-decay 0.01 --schedule cosine --warmup 30 --min-lr-frac 0.10 --replay-frac 0.12 --replay-mix "mid_v43_stage1_train.bin=0.80,mid_v43_stage2_train.bin=0.20" --replay-val mid_v43_val.bin --eval-every 100 --eval-iters 48 --sample-every 100 --save-every 100 --keep-last 12 --resume runs/fr-v4-v43/mid/ckpt_latest.pt
+```
+
+Les bins v4.5 contiennent une conversation entière par document (maximum 512 tokens)
+et doivent être chargés avec `ConversationCorpus`. La loss SFT est une somme divisée
+par le nombre global de tokens assistant de l'update ; le replay conserve un poids
+séparé de 12 %. Le mix cible 24M tokens assistant en 30/18/18/12/8/6/5/3 et plafonne
+OpenHermes-FR à 12 %. Les 720 steps correspondent à environ 1,15 passe pour 24M
+tokens assistant et 38,4k tokens supervisés par update. Réexécuter l'audit après
+chaque rebuild et ajuster ce nombre si la densité change, sans relancer le mid.
+
 Benchmarks :
 
 ```powershell

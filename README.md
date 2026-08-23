@@ -169,6 +169,97 @@ At 131,072 tokens/step, 11,444 steps process 1,499,987,968 tokens, staying
 12,032 tokens below the hard budget. Evaluation and rolling checkpoints happen
 every 1,000 steps; `ckpt_best.pt` and the final checkpoint are also preserved.
 
+### v4.4 capability-balanced SFT
+
+The v4.4 SFT replaces the v4.2 fallback allocation that accidentally produced
+78.07% OpenHermes-FR. Its 18M assistant-token budget is split into six closed
+capabilities: 25% native French chat, 20% student-oriented distillation, 30%
+verified reasoning, 12% grounded QA, 8% constraints/calibration and 5% short
+multi-turn/identity examples. A missing source creates an explicit shortfall;
+it is never replaced by a different capability. OpenHermes-FR is capped at 15%,
+GSM8K-FR at 3%, every source at 20%, and every record at one effective pass.
+
+`frlm/synth_programs.py` generates fresh executable programs independently from
+their French renderers. It also reserves complete renderer families for validation,
+adds grounded QA and explicit unanswerable/contradictory prompts, and keeps 65-70%
+of generated answers direct. Bins remain separated by capability and the trainer
+samples them with explicit probabilities. The 15% anti-forgetting replay is 70%
+clean pretrain and 30% v4.3 mid data.
+
+```bash
+# CPU only: build and audit the v4.4 bins without changing pretrain or mid files.
+modal run --detach modal_app.py --gpu cpu --spawn --cmd \
+  "python run.py prepare-sft-v44 --data-dir data-v4 --target-supervised 18e6 --seq-len 2048"
+
+# Three 120-step pilots must be compared before the 300-450 step full SFT.
+# Repeat with --lr 3e-5, 1e-4 and 3e-4; do not start all three blindly.
+modal run modal_app.py --check-only --gpu h100 --cmd \
+  "python run.py sft --data-dir data-v4 --run fr-v4-v44-sft-lr1e4 --preset v4-base --sft-recipe v4.4 --seq-len 2048 --batch-size 16 --grad-accum 4 --max-steps 120 --optimizer adamw --lr 1e-4 --weight-decay 0.01 --schedule cosine --warmup 20 --min-lr-frac 0.10 --replay-frac 0.15 --replay-mix mid_v43_stage1_train.bin=0.80,mid_v43_stage2_train.bin=0.20 --replay-val mid_v43_val.bin --eval-every 25 --eval-iters 48 --sample-every 25 --save-every 25 --keep-last 8 --resume /vol/runs/fr-v4-v43/mid/ckpt_latest.pt"
+```
+
+OOD v2 is run on the v4.3 mid **before** this SFT. The new curriculum deliberately
+teaches several structural capabilities measured by OOD v2, so post-SFT quality
+must use its held-out schema/renderer validation and a newly sealed OOD generation;
+reporting OOD v2 after v4.4 as untouched generalization would be misleading.
+
+### v4.5 audited, conversation-isolated SFT
+
+The v4.4 pilot exposed two trainer bugs: a nominally conversation-aligned 2,048-token
+window still crossed every following EOT boundary, and gradient accumulation averaged
+microbatches instead of assistant tokens. v4.5 fixes both. Every SFT row now contains
+one complete conversation padded with unsupervised EOT tokens, so neither attention nor
+the Canon convolution can carry state between documents. Cross-entropy is summed and
+normalized by the global assistant-token count of the full update; replay has its own
+explicit 12% weight.
+
+The 24M-token mix follows the second audit: 30% general response/explanation, 18%
+grounded transformation, 18% verified reasoning, 12% constraints/structure, 8%
+multi-turn, 6% tested short code, 5% uncertainty and 3% style/identity. Sources are
+single-pass, OpenHermes-FR is capped at 12%, the overall mix targets 80% direct
+answers and 18% short traces, and allocations preserve whole conversations. The H100 run starts only from the final
+v4.3 MID checkpoint at step 11,444; it never reruns midtrain.
+
+```bash
+# CPU Modal: generate, filter and binarize only the new SFT.
+modal run --detach modal_app.py --gpu cpu --spawn --cmd \
+  "python run.py prepare-sft-v45 --data-dir data-v4 --target-supervised 24e6 --seq-len 512 --seed 451337"
+
+# Validate Volume metadata, masks and the exact MID checkpoint without a GPU.
+modal run modal_app.py --check-only --gpu h100 --cmd \
+  "python run.py sft --data-dir data-v4 --run fr-v4-v45-sft --preset v4-base --sft-recipe v4.5 --seq-len 512 --batch-size 128 --grad-accum 12 --max-steps 720 --optimizer adamw --lr 2e-5 --weight-decay 0.01 --schedule cosine --warmup 30 --min-lr-frac 0.10 --replay-frac 0.12 --replay-mix mid_v43_stage1_train.bin=0.80,mid_v43_stage2_train.bin=0.20 --replay-val mid_v43_val.bin --eval-every 100 --eval-iters 48 --sample-every 100 --save-every 100 --keep-last 12 --resume /vol/runs/fr-v4-v43/mid/ckpt_latest.pt"
+```
+
+With about 38.4k supervised assistant tokens per update, 720 steps expose roughly
+27.6M assistant tokens, or 1.15 passes over the 24M-token corpus. Re-run
+`python -m frlm.audit_sft_v45` after every corpus rebuild and adjust this value if
+the measured density changes.
+
+### v4 development observations (OOD v2)
+
+OOD v2 reports the exact raw generations rather than only an aggregate. The automatic
+score for the final v4.3 MID is 7/40; manual inspection finds one false negative on
+the transitive-age question: the extractor selects `Marc`, while the generated final
+sentence correctly says `Tom`. The corrected total is therefore **8/40**. No automatic
+false positive was found in that run. This is a clear improvement over v4.1 MID
+(3/40 automatic) and the v4.1/v4.2 SFT checkpoints (3-4/40 automatic).
+
+| checkpoint | automatic OOD v2 | facts | observation |
+|---|---:|---:|---|
+| v4.1 MID, step 6000 | 3/40 | 8/12 | older 404M-token curriculum |
+| v4.1 SFT, best step 500 | 4/40 | 8/12 | modest instruction gain, weak transfer |
+| v4.1 SFT, step 2500 | 3/40 | 6/12 | longer SFT regresses both OOD and facts |
+| v4.2 SFT, best step 1700 | 4/40 | 8/12 | cleaner text, no OOD breakthrough |
+| v4.3 MID, step 4000 | 7/40 | 9/12 | best factual checkpoint in this sweep |
+| v4.3 MID, final step 11444 | 7/40 (**8/40 manual**) | 6/12 | strongest manually audited OOD base |
+| v4.4 pilot SFT, step 120 | 4/40 | 5/12 | rejected: unstable and off-task generations |
+
+These runs suggest that the 1.5B-token v4.3 curriculum materially improved transfer,
+while the old SFT recipes damaged part of that gain. v4.5 is the corrective experiment:
+lower LR, larger assistant-token budget, isolated conversations, token-correct loss,
+capability-balanced sampling and 12% MID replay. It is **not scored yet**; OOD v2 is
+historical and a newly sealed benchmark is needed for a clean post-SFT generalization
+claim. Full raw outputs and decoding settings are in `bench/reports/bench_ood_v2_*.md`.
+
 ---
 
 ## Results

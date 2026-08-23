@@ -474,7 +474,8 @@ class QwenLikeLM(nn.Module):
         return "".join("A" if k == "attn" else "D" for k in kinds)
 
     # ---- forward ---------------------------------------------------------------------
-    def forward(self, idx, targets=None, loss_mask=None, z_loss: float = 0.0, diagnostics: bool = True):
+    def forward(self, idx, targets=None, loss_mask=None, z_loss: float = 0.0,
+                diagnostics: bool = True, loss_reduction: str = "mean"):
         B, T = idx.shape
         assert T <= self.cfg.max_seq_len, f"séquence {T} > max_seq_len {self.cfg.max_seq_len}"
         x = self.embed_tokens(idx)
@@ -496,12 +497,19 @@ class QwenLikeLM(nn.Module):
         # Masque de loss (SFT) : positions ignorées marquées -100, géré par le noyau.
         if loss_mask is not None:
             flat_targets = flat_targets.masked_fill(loss_mask.reshape(-1) == 0, -100)
-        loss = F.cross_entropy(flat_logits, flat_targets, ignore_index=-100)
+        if loss_reduction not in ("mean", "sum"):
+            raise ValueError(f"loss_reduction invalide : {loss_reduction}")
+        loss = F.cross_entropy(
+            flat_logits, flat_targets, ignore_index=-100, reduction=loss_reduction
+        )
 
         # z-loss : pénalise l'explosion de logsumexp(logits) — stabilité bf16.
         if z_loss > 0:
             lse = torch.logsumexp(flat_logits, dim=-1).float()
-            loss = loss + z_loss * lse.pow(2).mean()
+            active = flat_targets != -100
+            z = lse[active].pow(2)
+            z = z.sum() if loss_reduction == "sum" else z.mean()
+            loss = loss + z_loss * z
 
         if not diagnostics:
             return logits, loss, {}

@@ -143,7 +143,10 @@ class TrainConfig:
     z_loss: float = 1e-4
     max_steps: int = 20000
     replay_frac: float = 0.0          # part de batchs mid rejoués pendant le SFT
+    replay_mix: str = ""              # chemins=poids, ex. train.bin=0.7,mid...=0.3
+    replay_val: str = ""              # validation non masquée associée au replay
     mid_curriculum: str = ""          # "v4.3" -> deux bins 80/20 spécialisés
+    sft_recipe: str = ""              # "v4.4" -> sampling explicite par capacité
 
     # évaluation / logs
     eval_every: int = 500
@@ -242,8 +245,62 @@ class Trainer:
         self.sp = D.special_ids(self.tok)
 
         masked = cfg.stage == "sft"
+        self.val_sources: dict[str, D.BinCorpus] = {}
         self.mid_curriculum: list[tuple[float, str, D.BinCorpus]] = []
-        if cfg.stage == "mid" and cfg.mid_curriculum:
+        sft_recipe = cfg.sft_recipe.casefold().replace("v", "").replace(".", "")
+        if masked and sft_recipe:
+            if sft_recipe not in ("44", "45"):
+                sys.exit(f"[!] Recette SFT inconnue : {cfg.sft_recipe}")
+            try:
+                key = f"sft_v{sft_recipe}"
+                expected_recipe = {
+                    "44": "v4.4-balanced-capabilities-18m",
+                    "45": "v4.5-audited-isolated-24m",
+                }[sft_recipe]
+                section = json.loads((data_dir / "meta.json").read_text(
+                    encoding="utf-8"))[key]
+                if section["recipe"] != expected_recipe:
+                    raise ValueError(f"recette inattendue : {section['recipe']}")
+                corpus_cls = D.ConversationCorpus if sft_recipe == "45" else D.BinCorpus
+                corpora = []
+                for name, capability in section["capabilities"].items():
+                    if int(capability["actual_supervised"]) <= 0:
+                        continue
+                    if sft_recipe == "45":
+                        train = corpus_cls(data_dir / capability["train_path"], cfg.seq_len)
+                    else:
+                        train = corpus_cls(data_dir / capability["train_path"],
+                                           cfg.seq_len, with_mask=True)
+                    sampling_weight = (capability["train_conversations"]
+                                       if sft_recipe == "45"
+                                       else capability["actual_supervised"])
+                    corpora.append((name, train, float(sampling_weight)))
+                    if sft_recipe == "45":
+                        self.val_sources[name] = corpus_cls(
+                            data_dir / capability["val_path"], cfg.seq_len
+                        )
+                    else:
+                        self.val_sources[name] = corpus_cls(
+                            data_dir / capability["val_path"], cfg.seq_len, with_mask=True
+                        )
+                self.train_data = D.SourceMixtureCorpus(corpora)
+                if sft_recipe == "45":
+                    self.val_data = D.ConversationCorpus(
+                        data_dir / section["val_path"], cfg.seq_len
+                    )
+                else:
+                    self.val_data = D.BinCorpus(data_dir / section["val_path"],
+                                                cfg.seq_len, with_mask=True)
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                sys.exit(f"[!] Données SFT v4.{sft_recipe[-1]} absentes ou incohérentes ({exc}). "
+                         f"Lance : python run.py prepare-sft-v{sft_recipe} --data-dir data-v4")
+            total_weight = sum(weight for _, _, weight in corpora)
+            detail = ", ".join(
+                f"{name}={100 * weight / total_weight:.0f}%"
+                for name, _, weight in corpora
+            )
+            print(f"[i] SFT v4.{sft_recipe[-1]} par capacités actif : {detail}")
+        elif cfg.stage == "mid" and cfg.mid_curriculum:
             recipe = cfg.mid_curriculum.casefold().replace("v", "").replace(".", "")
             if recipe != "43":
                 sys.exit(f"[!] Curriculum mid inconnu : {cfg.mid_curriculum}")
@@ -272,17 +329,38 @@ class Trainer:
                 sys.exit(f"[!] {train_bin} introuvable. Lance :  python run.py prepare")
             self.train_data = D.BinCorpus(train_bin, cfg.seq_len, with_mask=masked)
             self.val_data = D.BinCorpus(val_bin, cfg.seq_len, with_mask=masked)
-        self.val_sources: dict[str, D.BinCorpus] = {}
         self.replay_train = self.replay_val = None
         if masked:
-            for source_path in sorted(data_dir.glob("sft_val_*.bin")):
-                source = source_path.stem.removeprefix("sft_val_")
-                try:
-                    self.val_sources[source] = D.BinCorpus(source_path, cfg.seq_len, with_mask=True)
-                except ValueError as exc:
-                    print(f"[!] validation {source} ignorée ({exc})")
+            if not self.val_sources:
+                for source_path in sorted(data_dir.glob("sft_val_*.bin")):
+                    source = source_path.stem.removeprefix("sft_val_")
+                    try:
+                        self.val_sources[source] = D.BinCorpus(source_path, cfg.seq_len,
+                                                               with_mask=True)
+                    except ValueError as exc:
+                        print(f"[!] validation {source} ignorée ({exc})")
             mid_train, mid_val = data_dir / "mid_train.bin", data_dir / "mid_val.bin"
-            if cfg.replay_frac > 0 and mid_train.exists() and mid_val.exists():
+            if cfg.replay_frac > 0 and cfg.replay_mix:
+                replay_corpora = []
+                try:
+                    for index, item in enumerate(cfg.replay_mix.split(",")):
+                        path_text, weight_text = item.rsplit("=", 1)
+                        path = Path(path_text.strip())
+                        path = path if path.is_absolute() else data_dir / path
+                        replay_corpora.append((path.stem, D.BinCorpus(path, cfg.seq_len),
+                                               float(weight_text)))
+                except (OSError, ValueError) as exc:
+                    sys.exit(f"[!] --replay-mix invalide ({exc})")
+                self.replay_train = D.SourceMixtureCorpus(replay_corpora)
+                base_val = Path(cfg.replay_val) if cfg.replay_val else data_dir / "val.bin"
+                if not base_val.is_absolute():
+                    base_val = data_dir / base_val
+                if not base_val.exists():
+                    sys.exit(f"[!] validation replay introuvable : {base_val}")
+                self.replay_val = D.BinCorpus(base_val, cfg.seq_len)
+                print(f"[i] replay anti-oubli actif : {100*cfg.replay_frac:.0f} % "
+                      f"({cfg.replay_mix})")
+            elif cfg.replay_frac > 0 and mid_train.exists() and mid_val.exists():
                 self.replay_train = D.BinCorpus(mid_train, cfg.seq_len)
                 self.replay_val = D.BinCorpus(mid_val, cfg.seq_len)
                 print(f"[i] replay anti-oubli actif : {100*cfg.replay_frac:.0f} % de batchs mid")
@@ -445,14 +523,24 @@ class Trainer:
     def evaluate(self) -> float:
         self.model.eval()
         def corpus_loss(corpus, n_iters: int, seed: int) -> float:
-            losses = []
+            loss_sum = 0.0
+            token_count = 0
             for i in range(n_iters):
                 x, y, m = corpus.get_batch(i, self.cfg.batch_size, seed=seed, device=self.device)
                 with torch.autocast("cuda", dtype=self.amp_dtype,
                                     enabled=self.device.startswith("cuda")):
-                    _, loss, _ = self.model(x, y, m, z_loss=0.0, diagnostics=False)
-                losses.append(loss.item())
-            return float(np.mean(losses))
+                    reduction = "sum" if m is not None else "mean"
+                    _, loss, _ = self.model(
+                        x, y, m, z_loss=0.0, diagnostics=False,
+                        loss_reduction=reduction,
+                    )
+                if m is None:
+                    loss_sum += loss.item()
+                    token_count += 1
+                else:
+                    loss_sum += loss.item()
+                    token_count += int(m.sum().item())
+            return loss_sum / max(1, token_count)
 
         if self.val_sources:
             per_source_iters = max(2, self.cfg.eval_iters // len(self.val_sources))
@@ -566,29 +654,80 @@ class Trainer:
                 t_data = t_fwd = t_bwd = 0.0
                 loss_sum = 0.0
                 stats_acc = {}
-                for micro in range(cfg.grad_accum):
+                batch_plan = []
+                if cfg.stage == "sft":
+                    # On connaît les deux dénominateurs avant le backward : la loss
+                    # assistant est ainsi normalisée par le nombre GLOBAL de tokens
+                    # supervisés, et le replay garde un poids explicite au lieu de
+                    # dominer parce que ses séquences sont beaucoup plus denses.
+                    replay_micros = (min(cfg.grad_accum - 1,
+                                         max(1, round(cfg.grad_accum * cfg.replay_frac)))
+                                     if self.replay_train is not None and cfg.grad_accum > 1
+                                     else 0)
+                    for micro in range(cfg.grad_accum):
+                        idx = self.step * cfg.grad_accum + micro
+                        replay = replay_micros > 0 and micro >= cfg.grad_accum - replay_micros
+                        corpus = self.replay_train if replay else self.training_corpus(self.step)
+                        batch_seed = cfg.seed + 101 if replay else cfg.seed
+                        # Préchargement CPU borné (quelques dizaines de Mo) pour
+                        # calculer le dénominateur exact sans garder plusieurs graphes GPU.
+                        x, y, m = corpus.get_batch(idx, cfg.batch_size, batch_seed, "cpu")
+                        count = int(m.sum().item()) if m is not None else int(y.numel())
+                        batch_plan.append((idx, replay, x, y, m, count))
+                    sft_count = sum(item[5] for item in batch_plan if not item[1])
+                    replay_count = sum(item[5] for item in batch_plan if item[1])
+                    if sft_count <= 0:
+                        raise RuntimeError("batch SFT sans aucun token assistant supervisé")
+                else:
+                    batch_plan = [(self.step * cfg.grad_accum + micro, False,
+                                   None, None, None, 0)
+                                  for micro in range(cfg.grad_accum)]
+
+                for micro, (idx, replay, x, y, m, count) in enumerate(batch_plan):
                     idx = self.step * cfg.grad_accum + micro
                     if profile:
                         torch.cuda.synchronize(); t0 = time.perf_counter()
-                    replay = (self.replay_train is not None
-                              and (idx * 9973 + cfg.seed) % 10_000 < round(cfg.replay_frac * 10_000))
-                    corpus = self.replay_train if replay else self.training_corpus(self.step)
-                    batch_seed = cfg.seed + 101 if replay else cfg.seed
-                    x, y, m = corpus.get_batch(idx, cfg.batch_size, batch_seed, self.device)
+                    if cfg.stage == "sft":
+                        if self.device.startswith("cuda"):
+                            x = x.pin_memory().to(self.device, non_blocking=True)
+                            y = y.pin_memory().to(self.device, non_blocking=True)
+                            m = m.pin_memory().to(self.device, non_blocking=True) if m is not None else None
+                        else:
+                            x, y = x.to(self.device), y.to(self.device)
+                            m = m.to(self.device) if m is not None else None
+                    else:
+                        corpus = self.training_corpus(self.step)
+                        x, y, m = corpus.get_batch(idx, cfg.batch_size, cfg.seed, self.device)
                     if profile:
                         torch.cuda.synchronize(); t1 = time.perf_counter(); t_data += t1 - t0
 
                     last = micro == cfg.grad_accum - 1
                     with torch.autocast("cuda", dtype=self.amp_dtype, enabled=use_cuda):
-                        _, loss, st = self.model(x, y, m, z_loss=cfg.z_loss, diagnostics=last)
+                        reduction = "sum" if cfg.stage == "sft" else "mean"
+                        _, loss, st = self.model(
+                            x, y, m, z_loss=cfg.z_loss, diagnostics=last,
+                            loss_reduction=reduction,
+                        )
                     if profile:
                         torch.cuda.synchronize(); t2 = time.perf_counter(); t_fwd += t2 - t1
-                    (loss / cfg.grad_accum).backward()
+                    if cfg.stage == "sft":
+                        if replay:
+                            weight = cfg.replay_frac / max(1, replay_count)
+                        else:
+                            weight = (1.0 - cfg.replay_frac) / sft_count
+                        weighted_loss = loss * weight
+                    else:
+                        weighted_loss = loss / cfg.grad_accum
+                    weighted_loss.backward()
                     if profile:
                         torch.cuda.synchronize(); t_bwd += time.perf_counter() - t2
-                    loss_sum += loss.detach()
+                    loss_sum += weighted_loss.detach()
                     if last:
                         stats_acc = st
+
+                if cfg.stage == "sft":
+                    stats_acc["assistant_tokens_update"] = float(sft_count)
+                    stats_acc["replay_tokens_update"] = float(replay_count)
 
                 # --- clipping + step -------------------------------------------------
                 if profile:
@@ -603,7 +742,7 @@ class Trainer:
                         "bwd": t_bwd * 1000 / cfg.grad_accum, "opt": (time.perf_counter() - t3) * 1000}
 
                 # --- métriques --------------------------------------------------------
-                loss_val = (loss_sum / cfg.grad_accum).item()
+                loss_val = loss_sum.item()
                 gn = gnorm.item()
                 self.step += 1
                 self.tokens_seen += tps_step
@@ -1025,6 +1164,10 @@ def add_train_args(p):
     p.add_argument("--z-loss", type=float, default=1e-4)
     p.add_argument("--replay-frac", type=float, default=0.0,
                    help="fraction de batchs mid rejoués pendant le SFT (anti-oubli)")
+    p.add_argument("--replay-mix", default="",
+                   help="bins non masqués et poids, ex. train.bin=0.7,mid.bin=0.3")
+    p.add_argument("--replay-val", default="",
+                   help="bin de validation non masqué associé à --replay-mix")
     p.add_argument("--eval-every", type=int, default=500)
     p.add_argument("--eval-iters", type=int, default=40)
     p.add_argument("--sample-every", type=int, default=1000)
@@ -1034,6 +1177,8 @@ def add_train_args(p):
     p.add_argument("--keep-last", type=int, default=3)
     p.add_argument("--mid-curriculum", default="",
                    help="pour la phase mid : v4.3 active les bins curriculum 80/20")
+    p.add_argument("--sft-recipe", default="",
+                   help="pour la phase SFT : v4.4/v4.5 activent le sampling par capacités")
     p.add_argument("--no-compile", dest="compile", action="store_false",
                    help="désactive torch.compile (actif par défaut : +94%% de débit ; "
                         "retombe tout seul en mode non compilé si triton manque)")
@@ -1066,7 +1211,9 @@ def cfg_from_args(args, stage: str) -> TrainConfig:
         weight_decay=args.weight_decay, grad_clip=args.grad_clip, schedule=args.schedule,
         warmup=args.warmup, min_lr_frac=args.min_lr_frac, decay_frac=args.decay_frac,
         z_loss=args.z_loss, max_steps=args.max_steps,
-        replay_frac=args.replay_frac, mid_curriculum=args.mid_curriculum,
+        replay_frac=args.replay_frac, replay_mix=args.replay_mix,
+        replay_val=args.replay_val,
+        mid_curriculum=args.mid_curriculum, sft_recipe=args.sft_recipe,
         eval_every=args.eval_every, eval_iters=args.eval_iters, sample_every=args.sample_every,
         ckpt_every_min=args.ckpt_every_min, save_every_steps=args.save_every,
         keep_last=args.keep_last, compile=args.compile,
@@ -1106,6 +1253,27 @@ def main():
     p.add_argument("--seed", type=int, default=1337)
     p.add_argument("--skip-download", action="store_true",
                    help="réutilise les JSONL locaux et les sources QA déjà filtrées")
+
+    p = sub.add_parser("prepare-sft-v44",
+                       help="construit le SFT v4.4 équilibré sans toucher au mid/pretrain")
+    p.add_argument("--data-dir", default="data-v4")
+    p.add_argument("--target-supervised", type=float, default=18e6,
+                   help="plafond de tokens assistant (les shortfalls ne sont pas redistribués)")
+    p.add_argument("--seq-len", type=int, default=2048)
+    p.add_argument("--seed", type=int, default=1337)
+    p.add_argument("--skip-download", action="store_true",
+                   help="réutilise les JSONL v4.4 déjà présents")
+
+    p = sub.add_parser("prepare-sft-v45",
+                       help="construit le SFT v4.5 audité sans toucher au mid/pretrain")
+    p.add_argument("--data-dir", default="data-v4")
+    p.add_argument("--target-supervised", type=float, default=24e6,
+                   help="tokens assistant uniques visés (défaut 24 millions)")
+    p.add_argument("--seq-len", type=int, default=512,
+                   help="longueur maximale d'une conversation isolée")
+    p.add_argument("--seed", type=int, default=1337)
+    p.add_argument("--skip-download", action="store_true",
+                   help="réutilise toutes les sources JSONL déjà présentes")
 
     p = sub.add_parser("train", help="pré-entraînement")
     add_train_args(p)
@@ -1213,6 +1381,33 @@ def main():
         print(json.dumps(rep, indent=2, ensure_ascii=False))
         print("\nÉtape suivante : python run.py mid --mid-curriculum v4.3 "
               "--max-steps 11444 --batch-size 16 --grad-accum 4 --seq-len 2048")
+
+    elif args.cmd == "prepare-sft-v44":
+        from frlm.sft_v44 import prepare as prepare_sft_v44
+
+        rep = prepare_sft_v44(
+            Path(args.data_dir), target_supervised=int(args.target_supervised),
+            max_seq_len=args.seq_len, seed=args.seed, skip_download=args.skip_download
+        )
+        print("\n=== SFT v4.4 prêt ===")
+        print(json.dumps(rep, indent=2, ensure_ascii=False))
+        print("\nÉtape suivante (après benchmark du mid) : python run.py sft "
+              "--sft-recipe v4.4 --max-steps 350 --lr 1e-4")
+
+    elif args.cmd == "prepare-sft-v45":
+        from frlm.sft_v45 import prepare as prepare_sft_v45
+
+        rep = prepare_sft_v45(
+            Path(args.data_dir), target_supervised=int(args.target_supervised),
+            max_seq_len=args.seq_len, seed=args.seed,
+            skip_download=args.skip_download,
+        )
+        print("\n=== SFT v4.5 prêt ===")
+        print(json.dumps(rep, indent=2, ensure_ascii=False))
+        print("\nÉtape suivante : python run.py sft --sft-recipe v4.5 "
+              "--seq-len 512 --batch-size 64 --grad-accum 12 --max-steps 1000 "
+              "--optimizer adamw --lr 2e-5 --replay-frac 0.12 "
+              "--resume runs/fr-v4-v43/mid/ckpt_latest.pt")
 
     elif args.cmd == "prepare" and args.rebin:
         rep = D.rebin_mid_sft(Path(args.data_dir), mid_frac=args.mid_frac,

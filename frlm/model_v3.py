@@ -426,7 +426,7 @@ class SpeedLM(QwenLikeLM):
         return logits
 
     def forward(self, idx, targets=None, loss_mask=None, z_loss: float = 0.0,
-                diagnostics: bool = True):
+                diagnostics: bool = True, loss_reduction: str = "mean"):
         B, T = idx.shape
         assert T <= self.cfg.max_seq_len, f"séquence {T} > max_seq_len {self.cfg.max_seq_len}"
         x = self._backbone(idx)
@@ -439,10 +439,17 @@ class SpeedLM(QwenLikeLM):
         flat_targets = targets.reshape(-1)
         if loss_mask is not None:
             flat_targets = flat_targets.masked_fill(loss_mask.reshape(-1) == 0, -100)
-        loss = F.cross_entropy(flat_logits, flat_targets, ignore_index=-100)
+        if loss_reduction not in ("mean", "sum"):
+            raise ValueError(f"loss_reduction invalide : {loss_reduction}")
+        loss = F.cross_entropy(
+            flat_logits, flat_targets, ignore_index=-100, reduction=loss_reduction
+        )
         if z_loss > 0:      # avec le softcap, quasi inactif — gardé par cohérence
             lse = torch.logsumexp(flat_logits, dim=-1).float()
-            loss = loss + z_loss * lse.pow(2).mean()
+            active = flat_targets != -100
+            z = lse[active].pow(2)
+            z = z.sum() if loss_reduction == "sum" else z.mean()
+            loss = loss + z_loss * z
 
         if not diagnostics:
             return logits, loss, {}
