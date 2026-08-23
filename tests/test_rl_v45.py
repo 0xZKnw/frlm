@@ -462,6 +462,28 @@ class TaskTests(unittest.TestCase):
                 )
                 self.assertEqual(checkpoint["accepted_updates"], 200)
 
+    def test_ancre_de_phase_survit_a_la_rotation_d_une_ancienne_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = RLVRTrainer.__new__(RLVRTrainer)
+            trainer.stage_dir = Path(directory)
+            trainer.cfg = RLVRConfig(keep_last=2)
+            trainer.update = 185
+            trainer._checkpoint_payload = Mock(return_value={"accepted_updates": 185})
+            for update in (310, 320):
+                torch.save(
+                    {"accepted_updates": update},
+                    trainer.stage_dir / f"ckpt_{update:06d}.pt",
+                )
+
+            trainer._materialize_phase_anchor()
+
+            self.assertFalse((trainer.stage_dir / "ckpt_000185.pt").exists())
+            for name in ("ckpt_best.pt", "ckpt_latest.pt", "ckpt_phase_anchor.pt"):
+                checkpoint = torch.load(
+                    trainer.stage_dir / name, map_location="cpu", weights_only=False
+                )
+                self.assertEqual(checkpoint["accepted_updates"], 185)
+
     def test_reprise_ancienne_isole_la_branche_de_metriques_abandonnee(self):
         with tempfile.TemporaryDirectory() as directory:
             trainer = RLVRTrainer.__new__(RLVRTrainer)

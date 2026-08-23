@@ -350,8 +350,11 @@ class RLVRTrainer:
     def _materialize_phase_anchor(self):
         """Fige le checkpoint revalidé comme ancre physique et nouveau best de phase."""
         self._save(best=True)
-        numbered = self.stage_dir / f"ckpt_{self.update:06d}.pt"
-        _atomic_link(numbered, self.stage_dir / "ckpt_phase_anchor.pt")
+        # `_save` peut immédiatement supprimer le fichier numéroté lorsque la
+        # reprise part d'une ancienne update et que `keep_last` est dépassé.
+        # `ckpt_best.pt`, créé avant cette rotation, reste en revanche persistant.
+        _atomic_link(self.stage_dir / "ckpt_best.pt",
+                     self.stage_dir / "ckpt_phase_anchor.pt")
 
     def _resume(self, spec: str):
         path = resolve_checkpoint(self.run_dir, self.cfg.stage_name, spec)
