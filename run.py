@@ -1013,7 +1013,7 @@ def cmd_chat(args):
     history: list[dict] = []
     think_mode = "auto"   # auto = le modèle décide · on = <think> forcé · off = bloc vide préinséré
 
-    def complete(prompt_text: str, stop_ids):
+    def complete(prompt_text: str, stop_ids, suppress_ids=()):
         ids = torch.tensor([tok.encode(prompt_text).ids], device=device)
         buf, printed = [], 0
         t0 = time.perf_counter()
@@ -1031,7 +1031,8 @@ def cmd_chat(args):
                 printed = len(txt)
 
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-            model.generate(ids, stop_ids=stop_ids, on_token=on_token, **gen_cfg)
+            model.generate(ids, stop_ids=stop_ids, suppress_ids=suppress_ids,
+                           on_token=on_token, **gen_cfg)
         dt = time.perf_counter() - t0
         print()
         console.print(f"[dim]{len(buf)} tokens · {len(buf)/max(dt,1e-6):.1f} tok/s · {dt:.2f}s[/]")
@@ -1090,9 +1091,14 @@ def cmd_chat(args):
                 history.pop(0)
                 prompt = build_prompt()
             console.print("[bold magenta]modèle ›[/] ", end="")
-            if prefill:
+            # Le bloc vide de `/think off` fait partie du prompt de contrôle, pas
+            # de la réponse du modèle : ne pas l'afficher comme une génération.
+            if think_mode == "on":
                 sys.stdout.write(prefill)
-            reply = prefill + complete(prompt, (sp["im_end"], sp["eot"]))
+            suppressed = ()
+            if think_mode == "off":
+                suppressed = (tok.token_to_id(D.THINK), tok.token_to_id(D.THINK_END))
+            reply = prefill + complete(prompt, (sp["im_end"], sp["eot"]), suppressed)
             # l'historique ne garde que la réponse finale : les traces de réflexion
             # rempliraient le contexte pour rien au tour suivant
             import re as _re

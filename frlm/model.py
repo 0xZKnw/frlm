@@ -559,6 +559,7 @@ class QwenLikeLM(nn.Module):
         top_p: float = 0.95,
         repetition_penalty: float = 1.1,
         stop_ids: tuple[int, ...] = (),
+        suppress_ids: tuple[int, ...] = (),
         on_token=None,
     ):
         self.eval()
@@ -583,6 +584,9 @@ class QwenLikeLM(nn.Module):
                 sel = logits[0, recent]
                 logits[0, recent] = torch.where(sel > 0, sel / repetition_penalty,
                                                 sel * repetition_penalty)
+
+            if suppress_ids:
+                logits[:, list(suppress_ids)] = float("-inf")
 
             if temperature <= 0:
                 next_id = logits.argmax(-1, keepdim=True)
