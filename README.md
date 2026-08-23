@@ -291,6 +291,29 @@ hallucination, while step 300 first answers `rouge vif` before later mentioning 
 leaves. A newly sealed benchmark is still needed for a clean post-SFT generalization
 claim. Full raw outputs and decoding settings are in `bench/reports/bench_ood_v2_*.md`.
 
+### What v4.5 means for the local RL stage
+
+v4.5 is not the strongest standalone reasoning checkpoint, but it remains the preferred
+policy initialization for RL. It learned the chat/instruction interface, produces shorter
+and more directly scorable answers than the MID, and retained the MID distribution during
+training (`mid_val` improved from 2.097 at the first evaluation to 2.089 at the end). The
+OOD regression therefore looks more like a change in answer policy and weak multi-step
+execution than catastrophic loss of the v4.3 representation.
+
+The final/best step 736 is preferred over step 300: both score 5/40 on manually audited
+OOD v2, while step 736 retains more factual completions (5/12 corrected versus 3/12).
+The next RL/RLAIF experiment must run locally rather than on Modal after the SFT budget.
+It should use exact Python-verifiable rewards for arithmetic, composition, ordering,
+cycles and insufficient-information traps; keep an explicit KL reference to the v4.5
+SFT; replay both SFT and MID examples; penalize missing final answers, unsupported facts
+and reward hacking; and select checkpoints on sealed seeds and paraphrased families.
+Internal reward alone must never choose the release checkpoint.
+
+A recovery from 5/40 to roughly 7-9/40 is a plausible experimental target, not a promised
+result. Reaching 10-12/40 would be a strong outcome for a 229M model and the available
+local compute. The MID checkpoint remains the mandatory no-regression reference throughout
+RL, because its manually corrected 8/40 is still the best demonstrated v4 reasoning score.
+
 ---
 
 ## Results
