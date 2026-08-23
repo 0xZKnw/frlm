@@ -234,6 +234,12 @@ With 37.5k supervised assistant tokens per update, 736 steps expose roughly
 `python -m frlm.audit_sft_v45` after every corpus rebuild and adjust this value if
 the measured density changes.
 
+The H100 run completed cleanly at step 736 (578.81M padded training tokens). Its
+final checkpoint is also `ckpt_best.pt`: validation macro reached 0.10197,
+`verified_reasoning` 0.13704 and replay MID validation 2.08871. These internal
+losses confirm that the recipe learned its supervised capabilities without visible
+MID forgetting; they do not by themselves establish an OOD reasoning gain.
+
 ### v4 development observations (OOD v2)
 
 OOD v2 reports the exact raw generations rather than only an aggregate. The automatic
@@ -270,12 +276,19 @@ auditable in `bench/reports/bench_ood_v2_fr-v3.md` and
 | v4.3 MID, step 4000 | 7/40 | 9/12 | best factual checkpoint in this sweep |
 | v4.3 MID, final step 11444 | 7/40 (**8/40 manual**) | 6/12 | strongest manually audited OOD base |
 | v4.4 pilot SFT, step 120 | 4/40 | 5/12 | rejected: unstable and off-task generations |
+| v4.5 SFT, step 300 | 5/40 | 4/12 (**3/12 manual**) | best internal reasoning loss, no OOD gain |
+| v4.5 SFT, final/best step 736 | **5/40 manual** | 6/12 (**5/12 manual**) | better instruction tuning, but below the MID on OOD v2 |
 
 These runs suggest that the 1.5B-token v4.3 curriculum materially improved transfer,
-while the old SFT recipes damaged part of that gain. v4.5 is the corrective experiment:
+while the old SFT recipes damaged part of that gain. v4.5 was the corrective experiment:
 lower LR, larger assistant-token budget, isolated conversations, token-correct loss,
-capability-balanced sampling and 12% MID replay. It is **not scored yet**; OOD v2 is
-historical and a newly sealed benchmark is needed for a clean post-SFT generalization
+capability-balanced sampling and 12% MID replay. It fixed the trainer/data path and
+preserved MID validation, but its final checkpoint scores only **5/40** on OOD v2,
+versus **8/40 after manual correction** for its source MID. Manual inspection found no
+hidden reasoning success in either the step-300 or final SFT report. It did find one
+factual false positive in each: the final mentions `Lisbonne` inside an unrelated
+hallucination, while step 300 first answers `rouge vif` before later mentioning green
+leaves. A newly sealed benchmark is still needed for a clean post-SFT generalization
 claim. Full raw outputs and decoding settings are in `bench/reports/bench_ood_v2_*.md`.
 
 ---
