@@ -993,7 +993,12 @@ def cmd_chat(args):
     if device == "cuda":
         model = model.to(torch.bfloat16)
 
-    tok = D.load_tokenizer(run_dir / "tokenizer.json")
+    tokenizer_paths = [run_dir / "tokenizer.json", Path(args.data_dir) / "tokenizer.json"]
+    tokenizer_path = next((candidate for candidate in tokenizer_paths if candidate.exists()), None)
+    if tokenizer_path is None:
+        searched = ", ".join(str(candidate) for candidate in tokenizer_paths)
+        sys.exit(f"[!] Tokenizer introuvable (chemins testés : {searched})")
+    tok = D.load_tokenizer(tokenizer_path)
     sp = D.special_ids(tok)
 
     console.print(f"[bold green]Modèle chargé[/] : {path.name} · step {ck['step']} · "
@@ -1363,6 +1368,8 @@ def main():
     p = sub.add_parser("chat", help="discute avec un checkpoint")
     p.add_argument("--run", default="fr-micro")
     p.add_argument("--out-dir", default="runs")
+    p.add_argument("--data-dir", default="data",
+                   help="dossier du tokenizer si le run n'en contient pas une copie")
     p.add_argument("--ckpt", default="latest", help="latest | best | chemin vers un .pt")
     p.add_argument("--stage", default=None, choices=["pretrain", "mid", "sft", "rl", "rlaif"],
                    help="force la phase à charger (défaut : rlaif, puis rl, sft, mid, pretrain)")
