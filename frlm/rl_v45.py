@@ -326,10 +326,41 @@ class RLVRTrainer:
             np.random.set_state(rng["numpy"])
         del checkpoint
         gc.collect()
+        self._rewind_future_metrics()
+        latest = self.stage_dir / "ckpt_latest.pt"
+        if path.is_file() and path.resolve() != latest.resolve():
+            _atomic_link(path, latest)
         print(f"[i] Reprise RLVR v4.5 : {path.name}, update {self.update}")
         if self._resume_revalidate:
             print(f"[i] Vérificateur mis à jour vers {VERIFIER_VERSION} : "
                   "le score du checkpoint sera recalculé avant la reprise.")
+
+    def _rewind_future_metrics(self):
+        """Isole les métriques d'une branche abandonnée lors d'une reprise ancienne."""
+        if not self.metrics_path.is_file():
+            return
+        kept, abandoned = [], []
+        for line in self.metrics_path.read_text(encoding="utf-8").splitlines(keepends=True):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            (kept if int(row.get("update", -1)) <= self.update else abandoned).append(line)
+        if not abandoned:
+            return
+        index = 1
+        while True:
+            archive = self.stage_dir / (
+                f"metrics_abandoned_after_{self.update:06d}_{index:02d}.jsonl"
+            )
+            if not archive.exists():
+                break
+            index += 1
+        archive.write_text("".join(abandoned), encoding="utf-8")
+        tmp = self.metrics_path.with_suffix(self.metrics_path.suffix + ".rewind.tmp")
+        tmp.write_text("".join(kept), encoding="utf-8")
+        tmp.replace(self.metrics_path)
+        print(f"[i] Reprise historique : {len(abandoned)} métriques postérieures isolées "
+              f"dans {archive.name}")
 
     def _next_task(self) -> TaskSpec:
         self._last_frontier_key = None

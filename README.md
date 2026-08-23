@@ -380,6 +380,9 @@ punctuation and marked-number shortcuts such as `donc 121` receive zero reward.
 Checkpoints record the typed-verifier version. Resuming an older checkpoint triggers
 a fixed-dev re-evaluation before any further optimizer update so a stale best score
 cannot survive a stricter verifier.
+When resuming an older best checkpoint, later metric rows are moved to a separate
+`metrics_abandoned_after_*.jsonl` file and `ckpt_latest.pt` is repointed atomically;
+the replacement branch therefore keeps an unambiguous history without deleting it.
 
 The frozen reference is intentionally fp32. A real RTX 4060 smoke test measured an
 initial token KL of about **0.96** with a bf16 reference despite identical source

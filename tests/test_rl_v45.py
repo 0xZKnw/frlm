@@ -193,6 +193,8 @@ class TaskTests(unittest.TestCase):
         trainer = RLVRTrainer.__new__(RLVRTrainer)
         trainer.cfg = RLVRConfig()
         trainer.run_dir = Path("unused")
+        trainer.stage_dir = trainer.run_dir / "rlvr-v45"
+        trainer.metrics_path = trainer.stage_dir / "metrics.jsonl"
         trainer.profile_sha256 = "profile"
         trainer.model, trainer.optimizer = Mock(), Mock()
         trainer.use_cuda = False
@@ -236,6 +238,26 @@ class TaskTests(unittest.TestCase):
             self.assertFalse(trainer._resume_revalidate)
             self.assertTrue((Path(directory) / "eval_resume_000050.json").is_file())
             trainer._save.assert_called_once_with(best=False)
+
+    def test_reprise_ancienne_isole_la_branche_de_metriques_abandonnee(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = RLVRTrainer.__new__(RLVRTrainer)
+            trainer.stage_dir = Path(directory)
+            trainer.metrics_path = trainer.stage_dir / "metrics.jsonl"
+            trainer.update = 50
+            rows = [{"update": update} for update in (49, 50, 51, 60, 61)]
+            trainer.metrics_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+            )
+            with patch("builtins.print"):
+                trainer._rewind_future_metrics()
+            kept = [json.loads(line)["update"]
+                    for line in trainer.metrics_path.read_text(encoding="utf-8").splitlines()]
+            archive = trainer.stage_dir / "metrics_abandoned_after_000050_01.jsonl"
+            abandoned = [json.loads(line)["update"]
+                         for line in archive.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(kept, [49, 50])
+            self.assertEqual(abandoned, [51, 60, 61])
 
 
 class OfflineRLAIFTests(unittest.TestCase):

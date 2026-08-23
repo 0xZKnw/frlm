@@ -197,6 +197,9 @@ Ne pas réintroduire un raccourci par nombre marqué (`donc 121`) pour ce schém
 La version du vérificateur est inscrite dans les nouveaux checkpoints. Une reprise
 d'un checkpoint plus ancien doit recalculer la macro dev avant toute nouvelle update
 et remplacer en mémoire le meilleur score devenu incomparable.
+Une reprise depuis un checkpoint antérieur à `metrics.jsonl` doit isoler les lignes
+postérieures dans `metrics_abandoned_after_*.jsonl` et repointer atomiquement
+`ckpt_latest.pt`, sans supprimer l'historique abandonné.
 
 Le RLAIF v4.5 produit deux paquets aveugles A/B dont l'ordre des candidats est inversé.
 Les jugements doivent être réalisés indépendamment, couvrir tous les IDs et désigner le
