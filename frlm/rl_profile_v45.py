@@ -1,0 +1,132 @@
+"""Profilage pass@k de la frontière RLVR v4.5, sans jeu OOD scellé."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import time
+from collections import defaultdict
+from pathlib import Path
+
+import torch
+
+from frlm import data as D
+from frlm.rl_engine_v45 import RolloutEngine, load_policy, resolve_checkpoint, resolve_tokenizer
+from frlm.rl_tasks_v45 import CAPABILITY_WEIGHTS, make_task
+from frlm.verifiers_v45 import verify
+
+
+def _summary(rows: list[dict], k: int) -> dict:
+    by_capability: dict[str, list[dict]] = defaultdict(list)
+    by_schema: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        by_capability[row["capability"]].append(row)
+        by_schema[row["schema_id"]].append(row)
+
+    def aggregate(items: list[dict]) -> dict:
+        n = len(items)
+        return {
+            "tasks": n,
+            "pass@1": sum(item["first_success"] for item in items) / max(1, n),
+            f"pass@{k}": sum(item["initial_successes"] >= 1 for item in items) / max(1, n),
+            "success_rate": sum(item["initial_successes"] for item in items) / max(1, n * k),
+            "dynamic_rate": sum(0 < item["initial_successes"] < k for item in items) / max(1, n),
+            "mean_entropy": sum(item["entropy"] for item in items) / max(1, n),
+        }
+
+    return {
+        "overall": aggregate(rows),
+        "capabilities": {key: aggregate(value) for key, value in sorted(by_capability.items())},
+        "schemas": {key: aggregate(value) for key, value in sorted(by_schema.items())},
+    }
+
+
+def profile(run: str, data_dir: str, out_dir: str, init_stage: str, init_ckpt: str,
+            tasks: int, k: int, frontier_k: int, max_new: int, seed: int,
+            device: str) -> dict:
+    if k < 2 or frontier_k < k:
+        raise ValueError("il faut 2 <= k <= frontier-k")
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("CUDA demandé mais indisponible")
+    run_dir = Path(out_dir) / run
+    checkpoint = resolve_checkpoint(run_dir, init_stage, init_ckpt)
+    tokenizer = D.load_tokenizer(resolve_tokenizer(run_dir, Path(data_dir)))
+    model, _cfg, checkpoint_meta = load_policy(checkpoint, device=device)
+    model.eval()
+    engine = RolloutEngine(model, tokenizer, device, max_new)
+    rng = random.Random(seed)
+    capabilities = tuple(CAPABILITY_WEIGHTS)
+    rows = []
+    started = time.time()
+    for index in range(tasks):
+        capability = capabilities[index % len(capabilities)]
+        difficulty = ((index // len(capabilities)) % 9 + 1) / 10
+        task = make_task(seed + index * 17, "dev", difficulty, capability)
+        torch.manual_seed(rng.randrange(2**31))
+        _prompt, samples = engine.sample(task, k)
+        results = [verify(task.answer, sample.text) for sample in samples]
+        successes = sum(result.primary_success for result in results)
+        initial_successes = successes
+        used_k = k
+        # La zone utile est mesurée plus précisément à pass@32 : elle décide ce
+        # qui mérite réellement du RL et ce qui doit être renvoyé vers le SFT.
+        if 0 < successes < k and frontier_k > k:
+            torch.manual_seed(rng.randrange(2**31))
+            _prompt, extra = engine.sample(task, frontier_k - k)
+            extra_results = [verify(task.answer, sample.text) for sample in extra]
+            samples.extend(extra)
+            results.extend(extra_results)
+            successes += sum(result.primary_success for result in extra_results)
+            used_k = frontier_k
+        row = {
+            "task_id": task.task_id, "schema_id": task.schema_id,
+            "capability": task.capability, "difficulty": task.difficulty,
+            "k": used_k, "initial_successes": initial_successes,
+            "successes": successes,
+            "first_success": bool(results[0].primary_success),
+            "entropy": sum(sample.entropy for sample in samples) / len(samples),
+            "failure_codes": [result.failure_code for result in results if not result.primary_success],
+        }
+        rows.append(row)
+        print(f"profile {index + 1:3d}/{tasks} · {capability:18s} · {successes}/{used_k}")
+    report = {
+        "schema": "frlm-rl-profile-v45-1", "created_unix": time.time(),
+        "elapsed_s": time.time() - started, "checkpoint": checkpoint_meta,
+        "config": {"tasks": tasks, "k": k, "frontier_k": frontier_k,
+                   "max_new": max_new, "seed": seed, "split": "dev"},
+        "summary": _summary(rows, k), "rows": rows,
+    }
+    stage = run_dir / "rlvr-v45"
+    stage.mkdir(parents=True, exist_ok=True)
+    path = stage / "profile.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    print(f"\nProfil sauvegardé : {path}")
+    return report
+
+
+def cmd_profile(args):
+    profile(args.run, args.data_dir, args.out_dir, args.init_stage, args.init_ckpt,
+            args.tasks, args.k, args.frontier_k, args.max_new, args.seed, args.device)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run", default="fr-v4-v45-sft")
+    parser.add_argument("--data-dir", default="data-v4")
+    parser.add_argument("--out-dir", default="runs")
+    parser.add_argument("--init-stage", default="sft")
+    parser.add_argument("--init-ckpt", default="best")
+    parser.add_argument("--tasks", type=int, default=60)
+    parser.add_argument("--k", type=int, default=6)
+    parser.add_argument("--frontier-k", type=int, default=32)
+    parser.add_argument("--max-new", type=int, default=112)
+    parser.add_argument("--seed", type=int, default=455_001)
+    parser.add_argument("--device", default="cuda")
+    cmd_profile(parser.parse_args())
+
+
+if __name__ == "__main__":
+    main()

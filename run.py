@@ -971,7 +971,8 @@ def cmd_chat(args):
     # Les phases RLAIF successives vivent dans rlaif, rlaif2, rlaif3… : on prend la
     # plus récente d'abord (tri décroissant), puis on redescend la chaîne.
     rlaifs = sorted((d.name for d in run_dir.glob("rlaif*") if d.is_dir()), reverse=True)
-    stages = [args.stage] if args.stage else [*rlaifs, "rl", "sft", "mid", "pretrain"]
+    v45_post = [name for name in ("dpo-v45", "rlvr-v45") if (run_dir / name).is_dir()]
+    stages = [args.stage] if args.stage else [*v45_post, *rlaifs, "rl", "sft", "mid", "pretrain"]
     path = None
     for st in stages:
         d = run_dir / st
@@ -1334,6 +1335,49 @@ def main():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--resume", nargs="?", const="latest", default=None)
 
+    p = sub.add_parser("rl-profile-v45",
+                       help="profile pass@6/pass@32 la frontière RLVR v4.5 sans OOD scellé")
+    p.add_argument("--run", default="fr-v4-v45-sft")
+    p.add_argument("--data-dir", default="data-v4")
+    p.add_argument("--out-dir", default="runs")
+    p.add_argument("--init-stage", default="sft")
+    p.add_argument("--init-ckpt", default="best")
+    p.add_argument("--tasks", type=int, default=60)
+    p.add_argument("--k", type=int, default=6)
+    p.add_argument("--frontier-k", type=int, default=32)
+    p.add_argument("--max-new", type=int, default=112)
+    p.add_argument("--seed", type=int, default=455001)
+    p.add_argument("--device", default="cuda")
+
+    p = sub.add_parser("rl-v45",
+                       help="RLVR DrGRPO local v4.5, mémoire bornée et replay supervisé")
+    p.add_argument("--run", default="fr-v4-v45-sft")
+    p.add_argument("--data-dir", default="data-v4")
+    p.add_argument("--out-dir", default="runs")
+    p.add_argument("--stage-name", default="rlvr-v45")
+    p.add_argument("--init-stage", default="sft")
+    p.add_argument("--init-ckpt", default="best")
+    p.add_argument("--ref-stage", default="sft")
+    p.add_argument("--ref-ckpt", default="best")
+    p.add_argument("--updates", type=int, default=200,
+                   help="nombre de mises à jour ayant au moins un groupe dynamique")
+    p.add_argument("--prompts", type=int, default=3)
+    p.add_argument("--group", type=int, default=6)
+    p.add_argument("--max-new", type=int, default=112)
+    p.add_argument("--micro-bs", type=int, default=2)
+    p.add_argument("--lr", type=float, default=2e-6)
+    p.add_argument("--kl-beta", type=float, default=0.018)
+    p.add_argument("--kl-target", type=float, default=0.012)
+    p.add_argument("--replay-weight", type=float, default=0.05)
+    p.add_argument("--oversample", type=float, default=4.0)
+    p.add_argument("--eval-every", type=int, default=10)
+    p.add_argument("--eval-tasks", type=int, default=12)
+    p.add_argument("--save-every", type=int, default=10)
+    p.add_argument("--seed", type=int, default=455100)
+    p.add_argument("--device", default="cuda")
+    p.add_argument("--allow-no-profile", action="store_true")
+    p.add_argument("--resume", nargs="?", const="latest", default=None)
+
     p = sub.add_parser("rlaif", help="GRPO à juge LLM : pool quotidien + protocole fichiers (voir frlm/rlaif.py)")
     p.add_argument("--run", default="fr-v4")
     p.add_argument("--out-dir", default="runs")
@@ -1377,7 +1421,8 @@ def main():
     p.add_argument("--data-dir", default="data",
                    help="dossier du tokenizer si le run n'en contient pas une copie")
     p.add_argument("--ckpt", default="latest", help="latest | best | chemin vers un .pt")
-    p.add_argument("--stage", default=None, choices=["pretrain", "mid", "sft", "rl", "rlaif"],
+    p.add_argument("--stage", default=None,
+                   choices=["pretrain", "mid", "sft", "rl", "rlaif", "rlvr-v45", "dpo-v45"],
                    help="force la phase à charger (défaut : rlaif, puis rl, sft, mid, pretrain)")
     p.add_argument("--temperature", type=float, default=0.8)
     p.add_argument("--top-k", type=int, default=50)
@@ -1461,6 +1506,14 @@ def main():
     elif args.cmd == "rl":
         from frlm.rl import cmd_rl
         cmd_rl(args)
+
+    elif args.cmd == "rl-profile-v45":
+        from frlm.rl_profile_v45 import cmd_profile
+        cmd_profile(args)
+
+    elif args.cmd == "rl-v45":
+        from frlm.rl_v45 import cmd_rl_v45
+        cmd_rl_v45(args)
 
     elif args.cmd == "rlaif":
         from frlm.rlaif import cmd_rlaif
