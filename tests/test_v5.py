@@ -136,6 +136,68 @@ class ModelV5Tests(unittest.TestCase):
         self.model = model_from_cfg(config_from_dict(self.cfg.to_dict()))
         self.x = torch.randint(5, 300, (1, 12))
 
+    def test_full_context_qsa_matches_reference_and_skips_token_loop(self):
+        import copy
+        reference = copy.deepcopy(self.model)
+        for module in reference.modules():
+            if type(module).__name__ == "Qwen4ExpTextQSAIndexer":
+                del module.forward
+        indexer = self.model.hf.model.layers[3].self_attn.indexer
+        for implementation in ("eager", "sdpa"):
+            self.model.hf.set_attn_implementation(implementation)
+            reference.hf.set_attn_implementation(implementation)
+            self.model.zero_grad(set_to_none=True)
+            reference.zero_grad(set_to_none=True)
+            expected, expected_loss, _ = reference(self.x, self.x.roll(-1, 1))
+            # Une régression vers la boucle amont doit échouer même si les logits restent justes.
+            with patch.object(type(indexer), "forward", side_effect=AssertionError("boucle QSA")):
+                actual, actual_loss, _ = self.model(self.x, self.x.roll(-1, 1))
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            torch.testing.assert_close(actual_loss, expected_loss, rtol=0, atol=0)
+            actual_loss.backward()
+            expected_loss.backward()
+            for a, b in zip(self.model.parameters(), reference.parameters()):
+                if b.grad is None:
+                    self.assertIsNone(a.grad)
+                else:
+                    torch.testing.assert_close(a.grad, b.grad, rtol=0, atol=0)
+
+    def test_qsa_cache_crosses_budget_without_losing_keys(self):
+        import copy
+        reference = copy.deepcopy(self.model).eval()
+        self.model.eval()
+        for model in (self.model, reference):
+            indexer = model.hf.model.layers[3].self_attn.indexer
+            indexer.token_budget = 8
+            indexer.block_topk = 2
+        del reference.hf.model.layers[3].self_attn.indexer.forward
+        actual_cache = self.model._alloc_caches(1, 32, "cpu", torch.float32)
+        expected_cache = reference._alloc_caches(1, 32, "cpu", torch.float32)
+        with torch.no_grad():
+            for start, end in ((0, 7), (7, 8), (8, 9), (9, 12)):
+                actual = self.model._forward_cached(self.x[:, start:end], actual_cache, start)
+                expected = reference._forward_cached(self.x[:, start:end], expected_cache, start)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                torch.testing.assert_close(actual_cache.layers[3].indexer_keys,
+                                           expected_cache.layers[3].indexer_keys, rtol=0, atol=0)
+
+    def test_qsa_masks_padding_empty_rows_and_budget_boundaries(self):
+        indexer = self.model.hf.model.layers[3].self_attn.indexer
+        indexer.token_budget, indexer.block_topk = 8, 2
+        for length in (1, 4, 7, 8, 9, 12):
+            hidden = torch.randn(2, length, self.cfg.d_model)
+            positions = (torch.ones(2, length, indexer.index_head_dim),
+                         torch.zeros(2, length, indexer.index_head_dim))
+            visible = torch.rand(2, 1, length, length) > 0.35
+            visible &= torch.ones(length, length, dtype=torch.bool).tril()
+            visible[:, :, 0] = False
+            for dtype in (torch.bool, torch.float32, torch.bfloat16):
+                mask = visible if dtype == torch.bool else torch.where(
+                    visible, torch.tensor(0, dtype=dtype), torch.finfo(dtype).min)
+                expected = type(indexer).forward(indexer, hidden, positions, mask, None)
+                actual = indexer(hidden, positions, mask, None)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_gradient_mask_and_already_shifted_targets(self):
         targets = self.x.roll(-1, 1)
         mask = torch.zeros_like(targets)

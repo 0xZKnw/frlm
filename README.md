@@ -29,13 +29,17 @@ stats dashboard, and a chat mode to poke the model without stopping training.
 
 ---
 
-## V5 expérimentale : Qwen4-exp 350M, préparation sans GPU
+## V5 expérimentale : Qwen4-exp 350M
 
 La v5 est un nouveau pré-entraînement à **350 011 504 paramètres**, distinct du
 229M v4. Elle réutilise l'implémentation officielle `Qwen4ExpForCausalLM` de
 Transformers 5.17.0 : Gated DeltaNet / attention 3:1, MoE 2/8 + expert partagé,
 GR4 et PLE. Le contexte maximal est 2048 ; aucun gain de sparsité QSA n'est
 revendiqué à cette longueur. Aucun résultat de qualité v5 n'existe encore.
+Quand le budget QSA couvre toutes les clés, l'adaptateur conserve directement
+le masque causal et évite la boucle de sélection par token. Les poids, le cache
+et le format d'export restent identiques ; sorties et gradients sont comparés
+à l'implémentation de référence dans les tests.
 
 La sélection des corpus, leurs licences, les mesures GGUF, les limites et le
 budget de 60 $ figurent dans [le rapport de préparation](bench/reports/v5_preparation_20260924.md).
@@ -57,9 +61,12 @@ Le SFT garde les conversations entières (1024 tokens), supervise uniquement
 l'assistant et convertit les poids cibles en probabilités de conversations.
 Les splits scellés sont exclus du choix des hyperparamètres et du checkpoint.
 
-`modal_v5.py` reste en préflight CPU tant que `--go` n'est pas fourni. Son image
-GPU, ses kernels et le débit réel seront vérifiés **après accord explicite**.
-Les commandes Modal, l'envoi des données et le pilote n'ont pas été exécutés.
+`modal_v5.py` reste en préflight CPU tant que `--go` n'est pas fourni.
+Le pilote H100 du 24 septembre a mesuré 28,9k tokens/s (batch 8, accumulation 8,
+contexte 1024, bf16, sans compilation du modèle). L'image utilise TileLang 0.1.14
+pour le backward GDN : FLA refuse le kernel Triton 3.5 sur H100 à cause du bug
+amont #640. Les ressources sont bornées à 4 cœurs et 32 GiB maximum.
+Pour continuer après déconnexion du client, utiliser `modal run --detach`.
 Après le pilote, fixer un nombre global de steps identique sur les deux comptes.
 `--stop-after-seconds` arrête proprement une session sans modifier ce schedule.
 Transférer le checkpoint `.pt` complet, les mêmes bins et manifests ; ne jamais

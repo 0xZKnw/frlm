@@ -6,6 +6,7 @@ gain de sparsité ni entraînement de l'indexeur long contexte n'est revendiqué
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from types import MethodType
 
 import torch
 from torch import nn
@@ -15,6 +16,21 @@ from frlm.model import QwenLikeLM
 
 
 PRESETS_V5 = {"v5-qwen4exp-350m": {}}
+
+
+def full_context_indexer(self, hidden_states, position_embeddings, attention_mask, past_key_values):
+    """Si tous les blocs tiennent dans le budget, QSA garde le masque causal entier."""
+    if attention_mask.shape[-1] > self.token_budget:
+        return type(self).forward(self, hidden_states, position_embeddings, attention_mask, past_key_values)
+    if past_key_values is not None:
+        # Garder les clés pour une éventuelle continuation au-delà du budget QSA.
+        keys = self.index_qk_proj(hidden_states)[..., self.index_n_heads * self.index_head_dim:]
+        keys = keys.reshape(*hidden_states.shape[:2], -1, self.index_head_dim).squeeze(2)
+        past_key_values.update_indexer(keys, self.layer_idx)
+    if attention_mask.dtype == torch.bool:
+        return attention_mask
+    return torch.where(attention_mask == 0, attention_mask.new_zeros(()),
+                       torch.finfo(attention_mask.dtype).min)
 
 
 def validate_resume(ck, cfg, model_cfg, data_hash, tokenizer_hash, sft_hash,
@@ -113,6 +129,8 @@ class Qwen4ExpLM(QwenLikeLM):
         for module in self.hf.modules():
             if type(module).__name__ == "Qwen4ExpTextRMSNorm":
                 module.zero_centered = True
+            elif type(module).__name__ == "Qwen4ExpTextQSAIndexer":
+                module.forward = MethodType(full_context_indexer, module)
 
     def num_params(self, non_embedding=False):
         total = sum(p.numel() for p in self.parameters())

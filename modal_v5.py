@@ -16,8 +16,12 @@ image = (modal.Image.from_registry("nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04",
          .apt_install("build-essential", "ninja-build")
          .pip_install_from_requirements("requirements-v5.txt")
          .pip_install("packaging", "ninja", "flash-linear-attention==0.5.2")
+         .pip_install("wheel==0.45.1")
          .run_commands("python -m pip install --no-build-isolation causal-conv1d==1.7.0")
-         .env({"PYTHONUNBUFFERED": "1", "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
+         # FLA refuse le backward GDN Triton 3.5 sur H100 (bug amont #640).
+         .pip_install("tilelang==0.1.14")
+         .env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/root/app",
+               "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
          .add_local_dir(".", remote_path="/root/app", ignore=["data*/**", "runs/**", ".git/**",
                          "**/__pycache__/**", "*.bin", "*.pt"]))
 app = modal.App("frlm-v5", image=image)
@@ -75,7 +79,8 @@ def preflight(args: list[str]):
     _check_command(shlex.join(args))
 
 
-@app.function(gpu="H100", cpu=4, memory=16384, volumes={"/vol": volume}, timeout=22200)
+@app.function(gpu="H100", cpu=(4, 4), memory=(16384, 32768),
+              volumes={"/vol": volume}, timeout=22200)
 def execute(args: list[str], seconds: float):
     import threading
     # Refuser le repli PyTorch lent avant de mesurer ou d'entraîner.

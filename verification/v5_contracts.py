@@ -1,5 +1,38 @@
-"""Recherche symbolique sur l'allocation réelle des tokens ; aucune E/S."""
+"""Recherche symbolique : quotas de tokens et couverture du budget QSA."""
+import torch
+
+from frlm.model_v5 import full_context_indexer
 from frlm.prepare_v5 import token_targets
+
+
+def qsa_full_budget(keys: int, visible: int, budget: int, block: int):
+    """Branche réelle du fast path + cardinalité de la sélection QSA amont.
+
+    Les tenseurs/cache et les valeurs numériques sont couverts séparément par tests.
+    """
+    assert 1 <= keys <= 2048
+    assert 0 <= visible <= keys
+    assert 1 <= budget <= 2048
+    assert 1 <= block <= 32
+
+    class Mask:
+        dtype = torch.bool
+        shape = (keys,)
+
+    class Indexer:
+        token_budget = budget
+
+        def forward(self, hidden, positions, mask, cache):
+            return None  # sentinelle du repli amont, sans E/S
+
+    mask = Mask()
+    selected = full_context_indexer(Indexer(), None, None, mask, None)
+    if selected is mask:
+        # L'amont conserve tous les blocs sélectionnés et le reliquat.
+        kept = min(budget // block, visible // block) * block + visible % block
+        assert kept == visible
+    else:
+        assert keys > budget
 
 
 def quotas(total: int, a: int, b: int, c: int):

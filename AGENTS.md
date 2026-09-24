@@ -501,6 +501,10 @@ Puis, selon la zone touchée :
 - La v5 utilise `arch=v5-qwen4exp`, `ModelConfigV5`, `Qwen4ExpLM` et le preset
   `v5-qwen4exp-350m` (350 011 504 paramètres). Dépendances séparées dans
   `requirements-v5.txt`. Réutiliser Transformers 5.17.0 ; ne pas recopier son modèle.
+- Le fast path QSA retourne le masque visible entier uniquement si le nombre de
+  clés est inférieur ou égal au budget. Conserver les mises à jour du cache
+  indexeur et le repli amont au-delà du budget. Tester sorties, gradients,
+  masques et franchissement du budget lors de toute modification.
 - Préparer avec `python -m frlm.prepare_v5 --data-dir data-v5 --target-tokens
   4000000000`, puis `python -m frlm.prepare_sft_v5 --data-dir data-v5`.
   Recettes et révisions : `recipes/v5_data.json`, `recipes/v5_sft.json`.
@@ -514,6 +518,10 @@ Puis, selon la zone touchée :
 - `modal_v5.py` exige `--go` après le préflight CPU pour allouer un H100. L'accord
   explicite de l'utilisateur reste nécessaire ; aucun lancement n'est autorisé
   pendant la préparation. Ne pas relancer le 229M.
+- Image Modal : `wheel==0.45.1` pour construire causal-conv1d, `PYTHONPATH=/root/app`,
+  `tilelang==0.1.14` pour contourner le bug Triton/Hopper #640 sans retirer sa garde.
+  Limites du job : 4 cœurs et 32 GiB maximum. Utiliser `modal run --detach` pour
+  une session nocturne ; le timer reste indépendant du schedule global.
 - Pour les deux comptes, conserver le même `--max-steps` global, les mêmes bins,
   tokenizer et réglages. Transférer le checkpoint complet avec optimiseurs/RNG.
   Utiliser `--stop-after-seconds` pour la limite de session ; pas de reprise
@@ -523,7 +531,9 @@ Puis, selon la zone touchée :
   dans `frlm/export_v5.py`. Référence numérique avec cache F32 et Flash Attention
   désactivée : le routage MoE peut amplifier des arrondis du cache F16.
   La réussite d'un chargement Q4 n'est pas une preuve de qualité quantifiée.
-- Vérification : `python -m unittest discover -s tests -v`, puis `python -m
-  crosshair check verification/v5_contracts.py --analysis_kind=asserts
+- Vérification : `python -m unittest discover -s tests -v`, puis `python -c
+  'import atexit, verification.v5_contracts; from crosshair.main import main; from
+  crosshair.auditwall import disable_auditwall; atexit.register(disable_auditwall);
+  main()' check verification/v5_contracts.py --analysis_kind=asserts
   --per_condition_timeout=15 --report_all`. Le job CI v5 vérifie aussi une petite
   conversion HF/GGUF sur CPU. Aucun test GPU/Modal ne doit partir sans accord.
