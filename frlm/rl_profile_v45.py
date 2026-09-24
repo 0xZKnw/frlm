@@ -12,7 +12,7 @@ import torch
 
 from frlm import data as D
 from frlm.rl_engine_v45 import RolloutEngine, load_policy, resolve_checkpoint, resolve_tokenizer
-from frlm.rl_tasks_v45 import CAPABILITY_WEIGHTS, make_task
+from frlm.rl_tasks_v45 import CAPABILITY_WEIGHTS, GENERATOR_VERSION, make_task
 from frlm.verifiers_v45 import verify
 
 
@@ -51,7 +51,7 @@ def _summary(rows: list[dict], k: int, frontier_k: int) -> dict:
 
 def profile(run: str, data_dir: str, out_dir: str, init_stage: str, init_ckpt: str,
             tasks: int, k: int, frontier_k: int, max_new: int, seed: int,
-            device: str, output: str = "profile.json", refine_from: str = "",
+            device: str, output: str = "profile_v2.json", refine_from: str = "",
             output_stage: str = "rlvr-v45") -> dict:
     if k < 2 or frontier_k < k:
         raise ValueError("il faut 2 <= k <= frontier-k")
@@ -69,6 +69,8 @@ def profile(run: str, data_dir: str, out_dir: str, init_stage: str, init_ckpt: s
             raise FileNotFoundError(f"profil à raffiner introuvable : {refine_from}")
         previous = json.loads(previous_path.read_text(encoding="utf-8"))
         expected = previous.get("config", {})
+        if expected.get("generator_version") != GENERATOR_VERSION:
+            raise ValueError("générateur du profil obsolète : refaire un profil dans un nouveau fichier")
         for key, value in (("tasks", tasks), ("k", k), ("frontier_k", frontier_k),
                            ("max_new", max_new), ("seed", seed)):
             if int(expected.get(key, -1)) != int(value):
@@ -142,6 +144,7 @@ def profile(run: str, data_dir: str, out_dir: str, init_stage: str, init_ckpt: s
         "schema": "frlm-rl-profile-v45-2", "created_unix": time.time(),
         "elapsed_s": time.time() - started, "checkpoint": checkpoint_meta,
         "config": {"tasks": tasks, "k": k, "frontier_k": frontier_k,
+                   "generator_version": GENERATOR_VERSION,
                    "max_new": max_new, "seed": seed, "split": "dev",
                    "refined_from": refine_from or None},
         "summary": _summary(rows, k, frontier_k), "rows": rows,
@@ -173,7 +176,7 @@ def main():
     parser.add_argument("--max-new", type=int, default=112)
     parser.add_argument("--seed", type=int, default=455_001)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--output", default="profile.json")
+    parser.add_argument("--output", default="profile_v2.json")
     parser.add_argument("--output-stage", default="rlvr-v45")
     parser.add_argument("--refine-from", default="")
     cmd_profile(parser.parse_args())

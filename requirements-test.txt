@@ -1,0 +1,6 @@
+# Python 3.12 ; torch CPU est installé séparément en CI.
+numpy==2.2.6
+tokenizers==0.21.4
+rich==13.9.4
+crosshair-tool==0.0.97
+z3-solver==4.15.1.0

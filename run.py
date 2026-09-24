@@ -36,6 +36,7 @@ from frlm import data as D
 from frlm import config_from_dict, model_from_cfg
 from frlm.model import PRESETS, ModelConfig, build_model
 from frlm.model_v3 import PRESETS_V3, ModelConfigV3
+from frlm.model_v5 import PRESETS_V5, ModelConfigV5
 from frlm.optim import build_optimizers, lr_multiplier
 
 ROOT = Path(__file__).resolve().parent
@@ -142,6 +143,7 @@ class TrainConfig:
     decay_frac: float = 0.2
     z_loss: float = 1e-4
     max_steps: int = 20000
+    stop_after_seconds: float = 0.0   # arrêt propre par invocation, schedule global inchangé
     replay_frac: float = 0.0          # part de batchs mid rejoués pendant le SFT
     replay_mix: str = ""              # chemins=poids, ex. train.bin=0.7,mid...=0.3
     replay_val: str = ""              # validation non masquée associée au replay
@@ -192,14 +194,19 @@ class CheckpointManager:
         latest = self.dir / "ckpt_latest.pt"
         self._atomic_save(payload, latest)
         rolling = self.dir / f"ckpt_step{step:07d}.pt"
-        shutil.copyfile(latest, rolling)
+        self._atomic_copy(latest, rolling)
         if is_best:
-            shutil.copyfile(latest, self.dir / "ckpt_best.pt")
+            self._atomic_copy(latest, self.dir / "ckpt_best.pt")
         # rotation
         olds = sorted(self.dir.glob("ckpt_step*.pt"))
         for p in olds[: max(0, len(olds) - self.keep_last)]:
             p.unlink(missing_ok=True)
         return latest
+
+    def _atomic_copy(self, source: Path, destination: Path):
+        tmp = destination.with_suffix(".tmp")
+        shutil.copyfile(source, tmp)
+        os.replace(tmp, destination)
 
     def resolve(self, spec: str) -> Path | None:
         if spec in ("latest", "auto", ""):
@@ -219,6 +226,10 @@ class Trainer:
     def __init__(self, cfg: TrainConfig, resume: str | None = None,
                  init_weights_only: bool = False):
         self.cfg = cfg
+        if cfg.stop_after_seconds < 0 or not math.isfinite(cfg.stop_after_seconds):
+            raise ValueError("stop-after-seconds doit être fini et positif ou nul")
+        if cfg.stage == "sft" and cfg.replay_frac > 0 and cfg.grad_accum < 2:
+            raise ValueError("le replay SFT exige grad_accum >= 2")
         self.init_weights_only = init_weights_only
         self.run_dir = Path(cfg.out_dir) / cfg.run_name
         # Un dossier de checkpoints PAR PHASE : un SFT ne doit jamais écraser le
@@ -245,29 +256,47 @@ class Trainer:
             sys.exit(f"[!] Tokenizer introuvable ({tok_path}). Lance d'abord :  python run.py prepare")
         self.tok = D.load_tokenizer(tok_path)
         self.sp = D.special_ids(self.tok)
+        self.data_manifest_sha256 = None
+        self.sft_manifest_sha256 = None
+        self.tokenizer_sha256 = None
+        if cfg.preset in PRESETS_V5:
+            from frlm.prepare_v5 import audit, sha256
+            audit(data_dir)
+            self.data_manifest_sha256 = sha256(data_dir / "manifest.json")
+            self.tokenizer_sha256 = sha256(tok_path)
+            if cfg.stage == "sft":
+                self.sft_manifest_sha256 = sha256(data_dir / "sft_manifest.json")
 
         masked = cfg.stage == "sft"
         self.val_sources: dict[str, D.BinCorpus] = {}
         self.mid_curriculum: list[tuple[float, str, D.BinCorpus]] = []
         sft_recipe = cfg.sft_recipe.casefold().replace("v", "").replace(".", "")
         if masked and sft_recipe:
-            if sft_recipe not in ("44", "45", "reason45", "reason45b"):
+            if sft_recipe not in ("5", "44", "45", "reason45", "reason45b", "reason45c"):
                 sys.exit(f"[!] Recette SFT inconnue : {cfg.sft_recipe}")
             try:
                 key = ({"reason45": "reason_bootstrap_v45",
+                        "reason45c": "reason_bootstrap_v45c",
                         "reason45b": "reason_bootstrap_v45b"}.get(
                             sft_recipe, f"sft_v{sft_recipe}"))
                 expected_recipe = {
+                    "5": "v5-sft-20260924",
                     "44": "v4.4-balanced-capabilities-18m",
                     "45": "v4.5-audited-isolated-24m",
                     "reason45": "v4.5-reason-bootstrap-ast-1",
                     "reason45b": "v4.5-reason-bootstrap-balanced-2",
+                    "reason45c": "v4.5-reason-bootstrap-corrected-3",
                 }[sft_recipe]
-                section = json.loads((data_dir / "meta.json").read_text(
-                    encoding="utf-8"))[key]
+                if sft_recipe == "5":
+                    from frlm.prepare_sft_v5 import audit as audit_sft
+                    audit_sft(data_dir)
+                    section = json.loads((data_dir / "sft_manifest.json").read_text())
+                else:
+                    section = json.loads((data_dir / "meta.json").read_text(
+                        encoding="utf-8"))[key]
                 if section["recipe"] != expected_recipe:
                     raise ValueError(f"recette inattendue : {section['recipe']}")
-                isolated = sft_recipe in ("45", "reason45", "reason45b")
+                isolated = sft_recipe in ("5", "45", "reason45", "reason45b", "reason45c")
                 corpus_cls = D.ConversationCorpus if isolated else D.BinCorpus
                 corpora = []
                 for name, capability in section["capabilities"].items():
@@ -280,6 +309,14 @@ class Trainer:
                                            cfg.seq_len, with_mask=True)
                     sampling_weight = (capability.get("sampling_weight")
                                        if isolated else capability["actual_supervised"])
+                    if section.get("sampling_unit") == "supervised_tokens":
+                        if train.dropped_too_long:
+                            raise ValueError(f"{name} contient des conversations trop longues")
+                        sampling_weight = D.token_sampling_weight(
+                            float(capability["target_token_weight"]),
+                            int(capability["train_conversations"]),
+                            int(capability["actual_supervised"]),
+                        )
                     if sampling_weight is None:
                         sampling_weight = capability["train_conversations"]
                     corpora.append((name, train, float(sampling_weight)))
@@ -301,6 +338,7 @@ class Trainer:
                                                 cfg.seq_len, with_mask=True)
             except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 command = ({"reason45": "prepare-reason-bootstrap-v45",
+                            "reason45c": "prepare-reason-bootstrap-v45c",
                             "reason45b": "prepare-reason-bootstrap-v45b"}.get(
                                 sft_recipe, f"prepare-sft-v{sft_recipe}"))
                 sys.exit(f"[!] Données SFT {cfg.sft_recipe} absentes ou incohérentes ({exc}). "
@@ -342,7 +380,7 @@ class Trainer:
             self.val_data = D.BinCorpus(val_bin, cfg.seq_len, with_mask=masked)
         self.replay_train = self.replay_val = None
         if masked:
-            if sft_recipe in ("reason45", "reason45b") and cfg.replay_frac > 0:
+            if sft_recipe in ("reason45", "reason45b", "reason45c") and cfg.replay_frac > 0:
                 sys.exit(f"[!] {sft_recipe} contient déjà sa rétention SFT ; utilise "
                          "--replay-frac 0 pour ne pas compter le replay deux fois")
             if not self.val_sources:
@@ -366,7 +404,7 @@ class Trainer:
                 except (OSError, ValueError) as exc:
                     sys.exit(f"[!] --replay-mix invalide ({exc})")
                 self.replay_train = D.SourceMixtureCorpus(replay_corpora)
-                base_val = Path(cfg.replay_val) if cfg.replay_val else data_dir / "val.bin"
+                base_val = Path(cfg.replay_val or "val.bin")
                 if not base_val.is_absolute():
                     base_val = data_dir / base_val
                 if not base_val.exists():
@@ -383,7 +421,11 @@ class Trainer:
 
         # ---- modèle ------------------------------------------------------------------
         # le nom du preset choisit l'architecture : "v3-*" -> model_v3 (speedrun)
-        if cfg.preset in PRESETS_V3:
+        if cfg.preset in PRESETS_V5:
+            if cfg.seq_len > 2048 or cfg.hybrid:
+                raise ValueError("v5 Qwen4-exp : contexte <= 2048, sans option --hybrid v2")
+            mcfg = ModelConfigV5(**PRESETS_V5[cfg.preset])
+        elif cfg.preset in PRESETS_V3:
             mcfg = ModelConfigV3(**PRESETS_V3[cfg.preset])
         else:
             mcfg = ModelConfig(**PRESETS[cfg.preset])
@@ -456,6 +498,9 @@ class Trainer:
                 "numpy": np.random.get_state(),
             },
             "stage": self.cfg.stage,
+            "data_manifest_sha256": self.data_manifest_sha256,
+            "sft_manifest_sha256": self.sft_manifest_sha256,
+            "tokenizer_sha256": self.tokenizer_sha256,
         }
 
     def training_corpus(self, step: int):
@@ -470,7 +515,7 @@ class Trainer:
 
     def load_checkpoint(self, spec: str):
         path = self.ckpt.resolve(spec)
-        if path is None:
+        if path is None and self.cfg.preset not in PRESETS_V5:
             # Un Volume peut ne contenir que latest alors que la copie locale ne
             # contient que best (ou inversement). Pour un chemin explicite, essayer
             # le checkpoint frère de la même phase avant tout autre repli.
@@ -482,13 +527,13 @@ class Trainer:
                 if alternate.exists():
                     path = alternate
                     print(f"[i] {requested.name} absent, repli sur {alternate}")
-        if path is None and spec in ("latest", "auto", ""):
+        if path is None and spec in ("latest", "auto", "") and self.cfg.preset not in PRESETS_V5:
             # Un téléchargement depuis Modal garde souvent seulement ckpt_best.pt.
             # Retomber dessus vaut infiniment mieux qu'un démarrage silencieux à zéro.
             path = self.ckpt.resolve("best")
             if path:
                 print(f"[i] {self.cfg.stage} : latest absent, repli sur {path.name}")
-        if path is None and self.cfg.stage == "sft":
+        if path is None and spec in ("latest", "auto", "", "best") and self.cfg.stage == "sft":
             # pas encore de checkpoint SFT -> on part du midtrain s'il existe, sinon
             # du pré-entraînement
             for phase in ("mid", "pretrain"):
@@ -500,7 +545,7 @@ class Trainer:
                         break
                 if path:
                     break
-        if path is None and self.cfg.stage == "mid":
+        if path is None and spec in ("latest", "auto", "", "best") and self.cfg.stage == "mid":
             manager = CheckpointManager(self.run_dir / "pretrain")
             for candidate in ("latest", "best"):
                 path = manager.resolve(candidate)
@@ -511,11 +556,18 @@ class Trainer:
             sys.exit(f"[!] Checkpoint demandé introuvable ({spec}). Refus de démarrer "
                      f"la phase '{self.cfg.stage}' à zéro.")
         ck = torch.load(path, map_location=self.device, weights_only=False)
+        if self.cfg.preset in PRESETS_V5:
+            from frlm.model_v5 import validate_resume
+            validate_resume(ck, self.cfg, self.mcfg.to_dict(), self.data_manifest_sha256,
+                            self.tokenizer_sha256, self.sft_manifest_sha256, self.init_weights_only)
         self.raw_model.load_state_dict(ck["model"])
         # au passage pretrain -> sft on repart des poids mais pas de l'état optimiseur
         same_stage = (ck.get("stage", "pretrain") == self.cfg.stage
                       and not self.init_weights_only)
-        if same_stage and len(ck.get("optimizers", [])) == len(self.opts):
+        if same_stage:
+            if len(ck.get("optimizers", [])) != len(self.opts):
+                raise ValueError("état optimiseur incomplet pour une reprise exacte ; "
+                                 "utiliser --init-weights-only pour une nouvelle phase")
             for o, sd in zip(self.opts, ck["optimizers"]):
                 o.load_state_dict(sd)
             self.step = ck["step"]
@@ -528,7 +580,8 @@ class Trainer:
                     torch.cuda.set_rng_state_all([s.cpu() for s in ck["rng"]["cuda"]])
                 np.random.set_state(ck["rng"]["numpy"])
             except Exception:
-                pass
+                if self.cfg.preset in PRESETS_V5:
+                    raise
             print(f"[i] Reprise depuis {path.name} — step {self.step}, {human(self.tokens_seen)} tokens vus")
         else:
             reason = "--init-weights-only" if self.init_weights_only else "nouvelle phase"
@@ -825,7 +878,9 @@ class Trainer:
                 due_time = (time.time() - self.last_ckpt_time) >= cfg.ckpt_every_min * 60
                 due_step = (cfg.save_every_steps > 0
                             and self.step % cfg.save_every_steps == 0)
-                if due_time or due_step or is_best or self.step >= cfg.max_steps or stop_file.exists():
+                timed_out = (cfg.stop_after_seconds > 0
+                             and time.time() - self.t_start >= cfg.stop_after_seconds)
+                if due_time or due_step or is_best or self.step >= cfg.max_steps or stop_file.exists() or timed_out:
                     self.ckpt.save(self.state_payload(), self.step, is_best=is_best)
                     self.last_ckpt_time = time.time()
                     tag = " [green](meilleur)[/]" if is_best else ""
@@ -837,6 +892,9 @@ class Trainer:
                 if stop_file.exists():
                     stop_file.unlink(missing_ok=True)
                     self.stop_requested = True
+                if timed_out:
+                    self.stop_requested = True
+                    console.print("[i] Budget de temps atteint ; reprise possible avec le même schedule.")
 
                 if interactive:
                     live.update(self._dashboard(
@@ -1177,7 +1235,7 @@ def add_train_args(p):
     p.add_argument("--run", default="fr-micro", help="nom du run (dossier dans runs/)")
     p.add_argument("--data-dir", default="data")
     p.add_argument("--out-dir", default="runs")
-    p.add_argument("--preset", default="micro", choices=list(PRESETS) + list(PRESETS_V3),
+    p.add_argument("--preset", default="micro", choices=list(PRESETS) + list(PRESETS_V3) + list(PRESETS_V5),
                    help="presets v3-* = architecture speedrun (model_v3.py)")
     p.add_argument("--hybrid", action="store_true",
                    help="archi Qwen3.5 complète : couches Gated DeltaNet + attention en 3:1 "
@@ -1186,6 +1244,8 @@ def add_train_args(p):
     p.add_argument("--grad-accum", type=int, default=2)
     p.add_argument("--seq-len", type=int, default=1024)
     p.add_argument("--max-steps", type=int, default=20000)
+    p.add_argument("--stop-after-seconds", type=float, default=0,
+                   help="arrêt propre après cette durée ; ne change pas le schedule global")
     p.add_argument("--optimizer", default="muon", choices=["muon", "adamw"])
     p.add_argument("--lr", type=float, default=None, help="LR principal (0.02 pour muon, 6e-4 pour adamw)")
     p.add_argument("--adam-lr", type=float, default=1.5e-3)
@@ -1214,7 +1274,7 @@ def add_train_args(p):
     p.add_argument("--mid-curriculum", default="",
                    help="pour la phase mid : v4.3 active les bins curriculum 80/20")
     p.add_argument("--sft-recipe", default="",
-                   help="SFT : v4.4/v4.5, reason45 ou reason45b (bootstrap équilibré)")
+                   help="SFT : v5 Qwen4-exp, v4.4/v4.5, reason45/reason45b historiques ou reason45c corrigé")
     p.add_argument("--no-compile", dest="compile", action="store_false",
                    help="désactive torch.compile (actif par défaut : +94%% de débit ; "
                         "retombe tout seul en mode non compilé si triton manque)")
@@ -1248,7 +1308,7 @@ def cfg_from_args(args, stage: str) -> TrainConfig:
         seq_len=args.seq_len, optimizer=args.optimizer, lr=lr, adam_lr=args.adam_lr,
         weight_decay=args.weight_decay, grad_clip=args.grad_clip, schedule=args.schedule,
         warmup=args.warmup, min_lr_frac=args.min_lr_frac, decay_frac=args.decay_frac,
-        z_loss=args.z_loss, max_steps=args.max_steps,
+        z_loss=args.z_loss, max_steps=args.max_steps, stop_after_seconds=args.stop_after_seconds,
         replay_frac=args.replay_frac, replay_mix=args.replay_mix,
         replay_val=args.replay_val,
         mid_curriculum=args.mid_curriculum, sft_recipe=args.sft_recipe,
@@ -1313,14 +1373,14 @@ def main():
     p.add_argument("--skip-download", action="store_true",
                    help="réutilise toutes les sources JSONL déjà présentes")
 
-    p = sub.add_parser("prepare-reason-bootstrap-v45",
+    p = sub.add_parser("prepare-reason-bootstrap-v45c",
                        help="construit le mini-SFT AST v4.5 sans téléchargement ni OOD v2")
     p.add_argument("--data-dir", default="data-v4")
     p.add_argument("--examples", type=int, default=20_000,
                    help="exemples synthétiques uniques (défaut 20k)")
-    p.add_argument("--seq-len", type=int, default=256)
+    p.add_argument("--seq-len", type=int, default=512)
     p.add_argument("--eval-per-split", type=int, default=120)
-    p.add_argument("--seed", type=int, default=455500)
+    p.add_argument("--seed", type=int, default=455900)
 
     p = sub.add_parser("prepare-reason-bootstrap-v45b",
                        help="publie le mix court 35 %% AST / 65 %% rétention v4.5")
@@ -1380,7 +1440,7 @@ def main():
     p.add_argument("--max-new", type=int, default=112)
     p.add_argument("--seed", type=int, default=455001)
     p.add_argument("--device", default="cuda")
-    p.add_argument("--output", default="profile.json")
+    p.add_argument("--output", default="profile_v2.json")
     p.add_argument("--output-stage", default="rlvr-v45",
                    help="stage dans lequel enregistrer le profil")
     p.add_argument("--refine-from", default="",
@@ -1397,7 +1457,7 @@ def main():
     p.add_argument("--ref-stage", default="sft")
     p.add_argument("--ref-ckpt", default="best")
     p.add_argument("--profile-name", default="",
-                   help="profil RLVR; en reprise, profile_phase2.json par défaut")
+                   help="profil RLVR; en reprise, profile_phase2_v2.json par défaut")
     p.add_argument("--updates", type=int, default=200,
                    help="nombre de mises à jour contenant exactement --prompts groupes dynamiques")
     p.add_argument("--prompts", type=int, default=3)
@@ -1584,7 +1644,7 @@ def main():
               "--optimizer adamw --lr 2e-5 --replay-frac 0.12 "
               "--resume runs/fr-v4-v43/mid/ckpt_latest.pt")
 
-    elif args.cmd == "prepare-reason-bootstrap-v45":
+    elif args.cmd == "prepare-reason-bootstrap-v45c":
         from frlm.reason_bootstrap_v45 import prepare as prepare_reason_v45
 
         rep = prepare_reason_v45(
@@ -1594,7 +1654,7 @@ def main():
         print("\n=== Bootstrap raisonnement v4.5 prêt ===")
         print(json.dumps(rep, indent=2, ensure_ascii=False))
         print("\nAudit obligatoire : python -m frlm.audit_reason_bootstrap_v45 "
-              "--data-dir data-v4")
+              "--data-dir data-v4 --recipe reason45c")
 
     elif args.cmd == "prepare-reason-bootstrap-v45b":
         from frlm.reason_bootstrap_v45 import prepare_balanced

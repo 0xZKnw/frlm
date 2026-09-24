@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,7 +10,8 @@ import numpy as np
 
 from frlm import data as D
 from frlm.reason_bootstrap_v45 import (
-    BALANCED_RECIPE_NAME, RECIPE_NAME, evaluate_ast, operator_signature,
+    BALANCED_RECIPE_NAME, CORRECTED_RECIPE_NAME, RECIPE_NAME, evaluate_ast,
+    make_example, operator_signature, program_key,
 )
 
 
@@ -38,6 +40,8 @@ def _audit_bin(path: Path, seq_len: int) -> dict:
     if int(lengths.max()) > seq_len + 1:
         raise ValueError(f"conversation > {seq_len + 1} tokens : {path}")
     supervised = np.add.reduceat(np.asarray(masks, dtype=np.int64), starts)
+    if np.any(masks > 1) or np.any(masks[starts] != 0) or np.any(masks[ends - 1] != 0):
+        raise ValueError(f"masque invalide sur padding/frontière : {path}")
     if np.any(supervised <= 0):
         raise ValueError(f"conversation sans token assistant : {path}")
     return {"tokens": len(tokens), "conversations": len(starts),
@@ -48,14 +52,19 @@ def audit(data_dir: Path, require_replay_local: bool = False,
           recipe: str = "reason45") -> dict:
     data_dir = Path(data_dir)
     meta = json.loads((data_dir / "meta.json").read_text(encoding="utf-8"))
-    section_key = "reason_bootstrap_v45b" if recipe == "reason45b" else "reason_bootstrap_v45"
-    expected_recipe = BALANCED_RECIPE_NAME if recipe == "reason45b" else RECIPE_NAME
+    section_key, expected_recipe = {
+        "reason45": ("reason_bootstrap_v45", RECIPE_NAME),
+        "reason45b": ("reason_bootstrap_v45b", BALANCED_RECIPE_NAME),
+        "reason45c": ("reason_bootstrap_v45c", CORRECTED_RECIPE_NAME),
+    }[recipe]
     section = meta.get(section_key) or {}
     if section.get("recipe") != expected_recipe:
         raise ValueError(f"recette bootstrap absente ou ancienne : {section.get('recipe')}")
-    total_weight = sum(float(row["sampling_weight"])
+    weight_key = "target_token_weight" if recipe == "reason45c" else "sampling_weight"
+    total_weight = sum(float(row[weight_key])
                        for row in section["capabilities"].values())
-    if abs(total_weight - 1.0) > 1e-9:
+    if (not np.isfinite(total_weight) or abs(total_weight - 1.0) > 1e-9
+            or any(float(row[weight_key]) <= 0 for row in section["capabilities"].values())):
         raise ValueError(f"poids du mélange incohérents : {total_weight}")
     seq_len = int(section["max_conversation_tokens"])
     bins = {}
@@ -74,9 +83,13 @@ def audit(data_dir: Path, require_replay_local: bool = False,
             expected = int(capability[f"{split}_tokens"])
             if bins[key]["tokens"] != expected:
                 raise ValueError(f"meta incohérente pour {path}: {bins[key]['tokens']} != {expected}")
+            if recipe == "reason45c" and split == "train":
+                if (bins[key]["supervised"] != int(capability["actual_supervised"])
+                        or bins[key]["conversations"] != int(capability["train_conversations"])):
+                    raise ValueError(f"compteurs du mélange en tokens incorrects : {name}")
 
-    raw_dir = data_dir / "raw"
-    train = _read_jsonl(raw_dir / "reason_bootstrap_v45_train.jsonl")
+    train_path = data_dir / section.get("train_manifest", "raw/reason_bootstrap_v45_train.jsonl")
+    train = _read_jsonl(train_path)
     eval_sets = {split: _read_jsonl(data_dir / relative)
                  for split, relative in section["eval_manifests"].items()}
     if len(train) != int(section["examples"]):
@@ -85,6 +98,22 @@ def audit(data_dir: Path, require_replay_local: bool = False,
     ids.extend(row["id"] for rows in eval_sets.values() for row in rows)
     if len(ids) != len(set(ids)):
         raise ValueError("fuite de prompts entre train et évaluations")
+    if recipe == "reason45c":
+        paths = {"train": train_path, **{split: data_dir / relative
+                                       for split, relative in section["eval_manifests"].items()}}
+        seen_programs = set()
+        for split, rows in {"train": train, **eval_sets}.items():
+            if hashlib.sha256(paths[split].read_bytes()).hexdigest() != section["manifest_sha256"][split]:
+                raise ValueError(f"manifeste modifié : {split}")
+            keys = {program_key(row["program_ast"]) for row in rows}
+            if keys & seen_programs:
+                raise ValueError(f"programme partagé entre splits : {split}")
+            seen_programs.update(keys)
+            for row in rows:
+                regenerated = make_example(row["seed"], split, row["objective"], row["operations"],
+                                           int(row["target"]) - 1 if row["objective"] == "find_error" else None)
+                if regenerated != row:
+                    raise ValueError(f"exemple non reproductible : {row['id']}")
     train_signatures = {operator_signature(row["program_ast"]) for row in train}
     structure_signatures = {
         operator_signature(row["program_ast"])
@@ -114,8 +143,8 @@ def main():
     parser.add_argument("--data-dir", default="data-v4")
     parser.add_argument("--require-replay-local", action="store_true",
                         help="exige aussi une copie locale des anciens bins v4.5")
-    parser.add_argument("--recipe", default="reason45",
-                        choices=("reason45", "reason45b"))
+    parser.add_argument("--recipe", default="reason45c",
+                        choices=("reason45", "reason45b", "reason45c"))
     args = parser.parse_args()
     print(json.dumps(audit(Path(args.data_dir), args.require_replay_local, args.recipe),
                      ensure_ascii=False, indent=2))

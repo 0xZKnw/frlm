@@ -1,5 +1,41 @@
 # AGENTS.md
 
+## Correctifs reason45c (2026-09-24)
+
+- Les recettes reason45/reason45b et leurs rapports sont historiques. La nouvelle
+  génération utilise `python run.py prepare-reason-bootstrap-v45c --data-dir data-v4
+  --examples 20000 --seq-len 512 --eval-per-split 600 --seed 455900` (sur une seule ligne).
+  Elle écrit seulement les fichiers `reason_v45c_*`, `reason_bootstrap_v45c_*` et la
+  nouvelle section de meta.json ; elle refuse une republication sur des fichiers c
+  existants. Ne pas réécrire les anciens corpus/rapports.
+- Entraîner avec `--sft-recipe reason45c --seq-len 512 --replay-frac 0` et repartir
+  du SFT original avec `--init-weights-only`. Le mix 35/65 désigne désormais des
+  tokens assistant en espérance ; le sampler convertit ces cibles en probabilités
+  de conversations. Ne pas confondre ces deux distributions.
+- Les étapes d'ordre ne doivent exposer ni numéro d'exécution ni variable ordinale.
+  Accepter toutes les extensions topologiques valides. Équilibrer les positions
+  d'erreur par longueur ; les tâches de trace ont au moins deux opérations.
+- `iid`, `surface_holdout`, `structure_holdout` servent au développement. Le split
+  `final_sealed` est réservé à une seule évaluation après gel du protocole et du
+  checkpoint (`--final-eval --splits final_sealed`). Son hash est figé mais son
+  contenu local n'est pas chiffré. OOD v2 ne sert jamais à préparer les données.
+- L'audit `python -m frlm.audit_reason_bootstrap_v45 --data-dir data-v4 --recipe
+  reason45c` contrôle aussi les programmes et manifests. Le profileur AST courant
+  utilise c, stratifie par objectif/difficulté et peut calculer `--baselines-only`
+  sans checkpoint. Toute nouvelle évaluation écrit un fichier distinct.
+- Le générateur RL est `rl-tasks-v45-2`. Refaire les profils avec cette version,
+  dans `profile_v2.json` ; les reprises créent `profile_phase2_v2.json`. Un profil
+  d'une ancienne version n'est pas raffiné/réutilisé. Les checkpoints existants
+  restent inchangés ; leur baseline dev sera recalculée après reprofile.
+- Le préflight CPU partagé se trouve dans `frlm/modal_preflight.py` et peut être
+  exécuté localement : `python -m frlm.modal_preflight --root . --cmd "..."`.
+  Il vérifie également les fichiers RL/profilage avant toute location GPU.
+- Les tests CPU existants sont des `unittest` : `python -m unittest discover -s tests -v`.
+  Dépendances : PyTorch 2.6.0 et `requirements-test.txt`. CI : `.github/workflows/cpu.yml`.
+  Contrats : `python -m crosshair check verification/reason45c_contracts.py
+  --analysis_kind=asserts --per_condition_timeout=15 --report_all` (sur une seule ligne).
+  Ne pas présenter l'absence de contre-exemple comme une preuve complète.
+
 ## Objet du projet
 
 `frlm` est un framework Python/PyTorch pour entraîner de zéro un petit modèle de
@@ -417,7 +453,7 @@ valider sur CPU les bins, métadonnées et checkpoints du Volume sans allouer de
 
 ## Validation des changements
 
-Il n'existe actuellement ni suite `pytest` ni configuration de linter. Adapter la
+La suite CPU utilise `unittest` ; il n'existe pas de configuration de linter. Adapter la
 validation à la portée du changement et signaler clairement ce qui n'a pas pu être
 exécuté.
 
@@ -458,3 +494,36 @@ Puis, selon la zone touchée :
   format de données ou la chaîne des phases change.
 - Dans le compte rendu final, donner les fichiers modifiés, les validations
   réellement exécutées et les validations GPU/cloud non exécutées.
+
+
+## V5 Qwen4-exp (préparation du 24 septembre 2026)
+
+- La v5 utilise `arch=v5-qwen4exp`, `ModelConfigV5`, `Qwen4ExpLM` et le preset
+  `v5-qwen4exp-350m` (350 011 504 paramètres). Dépendances séparées dans
+  `requirements-v5.txt`. Réutiliser Transformers 5.17.0 ; ne pas recopier son modèle.
+- Préparer avec `python -m frlm.prepare_v5 --data-dir data-v5 --target-tokens
+  4000000000`, puis `python -m frlm.prepare_sft_v5 --data-dir data-v5`.
+  Recettes et révisions : `recipes/v5_data.json`, `recipes/v5_sft.json`.
+  Une modification de recette/tokenizer exige un nouveau dossier.
+- `manifest.json` couvre le prétrain ; `sft_manifest.json` reste distinct pour ne
+  pas invalider une reprise prétrain. Les empreintes des bins sont contrôlées avant
+  utilisation. Les corpus bruts, bins et états SQLite restent hors Git.
+- `--sft-recipe v5` utilise les conversations entières et les poids en tokens
+  assistant ; ne pas confondre leur distribution avec celle des conversations.
+  Le déficit de la source AST est explicite, jamais rempli par duplication.
+- `modal_v5.py` exige `--go` après le préflight CPU pour allouer un H100. L'accord
+  explicite de l'utilisateur reste nécessaire ; aucun lancement n'est autorisé
+  pendant la préparation. Ne pas relancer le 229M.
+- Pour les deux comptes, conserver le même `--max-steps` global, les mêmes bins,
+  tokenizer et réglages. Transférer le checkpoint complet avec optimiseurs/RNG.
+  Utiliser `--stop-after-seconds` pour la limite de session ; pas de reprise
+  weights-only dans la même phase. Le préflight et Trainer partagent ce contrat.
+- GGUF : `python -m bench.verify_v5_gguf --llama-cpp /chemin/llama.cpp
+  --tokenizer data-v5/tokenizer.json --full-size`. Révision llama.cpp épinglée
+  dans `frlm/export_v5.py`. Référence numérique avec cache F32 et Flash Attention
+  désactivée : le routage MoE peut amplifier des arrondis du cache F16.
+  La réussite d'un chargement Q4 n'est pas une preuve de qualité quantifiée.
+- Vérification : `python -m unittest discover -s tests -v`, puis `python -m
+  crosshair check verification/v5_contracts.py --analysis_kind=asserts
+  --per_condition_timeout=15 --report_all`. Le job CI v5 vérifie aussi une petite
+  conversion HF/GGUF sur CPU. Aucun test GPU/Modal ne doit partir sans accord.

@@ -1,0 +1,54 @@
+name: Vérification CPU
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+permissions:
+  contents: read
+jobs:
+  cpu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CUDA_VISIBLE_DEVICES: ''
+      OMP_NUM_THREADS: '1'
+      TOKENIZERS_PARALLELISM: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install -r requirements-test.txt
+      - run: python -m compileall -q run.py modal_app.py frlm bench tests verification
+      - run: python run.py --help
+      - run: python -m unittest discover -s tests -v
+      - run: python -m crosshair check verification/reason45c_contracts.py --analysis_kind=asserts --per_condition_timeout=15 --report_all
+  v5:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CUDA_VISIBLE_DEVICES: ''
+      OMP_NUM_THREADS: '2'
+      TOKENIZERS_PARALLELISM: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install -r requirements-v5.txt modal==1.5.5 sentencepiece==0.2.1 crosshair-tool==0.0.97 z3-solver==4.15.1.0
+      - run: python run.py --help
+      - run: python -m unittest discover -s tests -v
+      - run: python -m crosshair check verification/v5_contracts.py --analysis_kind=asserts --per_condition_timeout=15 --report_all
+      - name: Construire le runtime GGUF épinglé (CPU)
+        run: |
+          git init /tmp/llama-v5
+          git -C /tmp/llama-v5 remote add origin https://github.com/ggml-org/llama.cpp.git
+          git -C /tmp/llama-v5 fetch --depth 1 origin a72e04abe0fe9b36e203033ac71bd5f379c35bc5
+          git -C /tmp/llama-v5 checkout --detach FETCH_HEAD
+          cmake -S /tmp/llama-v5 -B /tmp/llama-v5/build -DGGML_CUDA=OFF -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_USE_PREBUILT_UI=OFF
+          cmake --build /tmp/llama-v5/build --target llama-tokenize llama-perplexity llama-quantize -j 2
+      - run: python -m bench.verify_v5_gguf --llama-cpp /tmp/llama-v5

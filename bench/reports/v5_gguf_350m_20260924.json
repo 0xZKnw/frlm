@@ -1,0 +1,12 @@
+{
+  "llama_revision": "a72e04abe0fe9b36e203033ac71bd5f379c35bc5",
+  "parameters": 350011504,
+  "tokenizer_cases": 6,
+  "f32_max_logprob_error": 2.288818359375e-05,
+  "f32_tolerance": 0.003,
+  "q4_k_m_loaded": true,
+  "reference_cache": "f32",
+  "reference_flash_attention": false,
+  "q4_bytes": 230143744,
+  "weights": "random+norms_and_PLE_perturbed"
+}

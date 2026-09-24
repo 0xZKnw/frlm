@@ -29,6 +29,162 @@ stats dashboard, and a chat mode to poke the model without stopping training.
 
 ---
 
+## V5 expérimentale : Qwen4-exp 350M, préparation sans GPU
+
+La v5 est un nouveau pré-entraînement à **350 011 504 paramètres**, distinct du
+229M v4. Elle réutilise l'implémentation officielle `Qwen4ExpForCausalLM` de
+Transformers 5.17.0 : Gated DeltaNet / attention 3:1, MoE 2/8 + expert partagé,
+GR4 et PLE. Le contexte maximal est 2048 ; aucun gain de sparsité QSA n'est
+revendiqué à cette longueur. Aucun résultat de qualité v5 n'existe encore.
+
+La sélection des corpus, leurs licences, les mesures GGUF, les limites et le
+budget de 60 $ figurent dans [le rapport de préparation](bench/reports/v5_preparation_20260924.md).
+Les données dérivées restent dans `data-v5/`, hors Git ; `data-v4/` et les runs
+historiques ne sont pas réécrits.
+
+```bash
+python3.12 -m venv .venv-v5
+source .venv-v5/bin/activate
+python -m pip install -r requirements-v5.txt
+python -m frlm.prepare_v5 --data-dir data-v5 --target-tokens 4000000000
+python -m frlm.prepare_sft_v5 --data-dir data-v5
+python -m frlm.prepare_v5 --data-dir data-v5 --audit-only
+python -m unittest discover -s tests -v
+```
+
+Le prétrain prépare 85 % de français et 15 % de maths anglophones en tokens.
+Le SFT garde les conversations entières (1024 tokens), supervise uniquement
+l'assistant et convertit les poids cibles en probabilités de conversations.
+Les splits scellés sont exclus du choix des hyperparamètres et du checkpoint.
+
+`modal_v5.py` reste en préflight CPU tant que `--go` n'est pas fourni. Son image
+GPU, ses kernels et le débit réel seront vérifiés **après accord explicite**.
+Les commandes Modal, l'envoi des données et le pilote n'ont pas été exécutés.
+Après le pilote, fixer un nombre global de steps identique sur les deux comptes.
+`--stop-after-seconds` arrête proprement une session sans modifier ce schedule.
+Transférer le checkpoint `.pt` complet, les mêmes bins et manifests ; ne jamais
+utiliser `--init-weights-only` pour changer de compte.
+
+L'export GGUF a été testé sur le 350M à poids aléatoires perturbés, avec le
+convertisseur/runtime llama.cpp épinglé dans `frlm/export_v5.py`. Le BPE français
+et les chiffres donnent les mêmes IDs ; F32 reproduit les log-probabilités HF,
+et Q4_K_M se charge et exécute l'inférence. La qualité après quantification reste
+à évaluer sur les futurs poids entraînés. Un logiciel utilisant un ancien
+llama.cpp peut ne pas reconnaître `qwen4exp`.
+
+```bash
+# Vérification locale de conversion, aucun entraînement ni GPU.
+python -m bench.verify_v5_gguf --llama-cpp /chemin/llama.cpp --tokenizer data-v5/tokenizer.json --full-size
+# Après entraînement, export d'un checkpoint explicitement choisi.
+python -m frlm.export_v5 --checkpoint runs/fr-v5-qwen4exp/sft/ckpt_best.pt --tokenizer data-v5/tokenizer.json --hf-dir exports/v5-hf --llama-cpp /chemin/llama.cpp --output exports/v5-f16.gguf
+```
+
+## Correctifs du pipeline du 24 septembre 2026 : reason45c
+
+Les recettes `reason45` et `reason45b` et leurs résultats ci-dessous sont
+**historiques** : leurs exercices de remise en ordre exposaient la solution, leurs
+traces à une étape favorisaient la réponse constante « 1 », et certains énoncés
+perdaient les regroupements de l'AST. Elles ne constituent pas une mesure fiable
+du calcul. Le générateur courant écrit exclusivement **reason45c**, toujours en
+v4.5 ; les anciens bins, checkpoints et rapports restent lisibles et intacts.
+`prepare-reason-bootstrap-v45c` remplace l'ancienne commande de génération.
+
+```bash
+python run.py prepare-reason-bootstrap-v45c --data-dir data-v4 --examples 20000 --seq-len 512 --eval-per-split 600 --seed 455900
+python -m frlm.audit_reason_bootstrap_v45 --data-dir data-v4 --recipe reason45c
+python -m frlm.eval_reason_bootstrap_v45 --run baseline-cpu --stage sft --data-dir data-v4 --baselines-only --tasks 600 -k 4 --report bench/reports/reason45c_baselines_nouveau.json
+```
+
+La génération publie `reason_v45c_*.bin/.mask`,
+`raw/reason_bootstrap_v45c_*.jsonl` et une nouvelle section
+`reason_bootstrap_v45c` dans `meta.json`. Elle refuse d'écraser une version c
+existante : utiliser un autre répertoire pour une autre recette/seed. Les échecs
+de tokenisation/longueur ne publient pas un corpus partiel. Les données de cette
+vérification ont été produites dans `/tmp/frlm-reason45c-real-20260924`, sans toucher
+à `data-v4/` ; ce dossier temporaire n'est pas un stockage permanent.
+
+Les opérations sont parenthésées, les variables des exercices d'ordre sont
+renommées aléatoirement, et tous les tris topologiques valides sont acceptés. Les
+objectifs de trace ont deux ou trois opérations ; les positions d'erreur sont
+équilibrées conditionnellement à leur longueur. Le calcul direct conserve aussi
+un niveau à une opération, rapporté séparément. Une erreur injectée est propagée
+aux étapes suivantes : une seule égalité locale est fausse.
+
+Le stock compte autant de conversations par objectif ; le trainer vise **35 % de
+tokens assistant AST / 65 % de rétention**, en divisant les poids de tokens par la
+longueur supervisée moyenne des conversations. Ce sont des proportions en
+espérance, pas des quotas exacts par update. Les anciennes recettes gardent leur
+échantillonnage historique. La rétention c exclut les compartiments
+`verified_reasoning` et `constraints_structure` v4.5 existants : des remises
+fractionnaires y étaient tronquées et une consigne JSON omettait l'opération
+attendue. Les générateurs de ces deux exercices sont corrigés ; régénérer les
+sources et bins concernés dans un nouveau répertoire avant de les réintroduire.
+Conserver `--seq-len 512` pour les conversations de rétention et `--replay-frac 0`.
+
+Les programmes sont répartis par hash indépendant des formulations/objectifs,
+avec canonicalisation des opérandes commutatifs. Le holdout structurel conserve
+des topologies distinctes ; les objectifs auxiliaires ont aussi de vraies
+consignes réservées au holdout de surface. `iid`, `surface_holdout` et
+`structure_holdout` servent au développement. `final_sealed` n'entre ni dans les
+bins de validation ni dans le profil par défaut. Après gel du checkpoint et du
+protocole, une seule évaluation finale utilise explicitement
+`--final-eval --splits final_sealed`, avec un nouveau rapport. Les hashes des
+manifests sont contrôlés. Ce scellement est procédural, pas un coffre secret.
+OOD v2 reste un benchmark de développement historique et n'est jamais lu pour
+construire reason45c.
+
+```bash
+python -m frlm.eval_reason_bootstrap_v45 --run fr-v4-v45-sft --stage sft --ckpt best --data-dir data-v4 --tasks 90 -k 4 --report bench/reports/reason45c_sft_reference.json
+# Même commande et mêmes paramètres pour le candidat, avec un autre --run/--report.
+```
+
+Le profil conserve les prompts, sorties brutes et paramètres de génération. Il
+rapporte chaque objectif et nombre d'opérations, les constantes fixes, le plafond
+majoritaire calculé a posteriori, et le hasard (permutations, positions ou entiers
+uniformes entre -600 et 600). Le total micro est secondaire. Aucun score du modèle
+229M sur cette nouvelle recette n'a été mesuré pendant la correction.
+
+Le générateur RL passe à `rl-tasks-v45-2` : les moyennes ne contiennent plus leur
+réponse comme terme central et les prompts train/dev des contraintes, de
+l'incertitude et du suivi d'état sont distincts. Les anciens profils doivent être
+refaits, sans raffinement depuis l'ancienne version. Les noms par défaut sont
+maintenant `profile_v2.json` et, en reprise, `profile_phase2_v2.json`. Les nouveaux
+profils ne sont pas comparables aux anciens ; les gates existantes refusent des
+IDs de tâches différents. Les commandes RL historiques plus bas doivent donc
+utiliser les nouveaux noms pour une nouvelle expérience.
+
+Le préflight est testable localement, sans SDK Modal ni allocation distante :
+
+```bash
+python -m frlm.modal_preflight --root . --cmd "python run.py rl-profile-v45 --run fr-v4-v45-sft --data-dir data-v4 --output profile_v2.json"
+# Après transfert des seuls nouveaux artefacts sur le Volume, et seulement avec
+# autorisation d'exécution distante : modal run modal_app.py --check-only --cmd "..."
+```
+
+Il couvre SFT, RLVR, profils RL et profils AST : fichiers, tokenizer, config et
+formes des poids, références, états de reprise et profils/version. Une reprise
+RL qui reprofilera automatiquement son ancre n'exige pas un ancien profil. Le
+wrapper n'ajoute plus un argument d'entraînement aux commandes d'évaluation qui
+contiennent `--stage sft`.
+
+Validation CPU (Python 3.12, aucun téléchargement de corpus/checkpoint) :
+
+```bash
+python -m pip install torch==2.6.0  # en CI : index des wheels CPU PyTorch
+python -m pip install -r requirements-test.txt
+python -m unittest discover -s tests -v
+python -m compileall -q run.py modal_app.py frlm bench tests verification
+python run.py --help
+python -m crosshair check verification/reason45c_contracts.py --analysis_kind=asserts --per_condition_timeout=15 --report_all
+```
+
+La CI `.github/workflows/cpu.yml` reprend ces contrôles sur les PR et pushes à
+`main`/`master`. CrossHair cherche des contre-exemples ; un résultat inconclusif
+n'est pas une preuve. Le [rapport détaillé](bench/reports/pipeline_corrections_20260924.md)
+donne les cas reproduits, bornes, validations, limites et un pilote Modal proposé
+à 12 $ maximum de budget prévisionnel (non lancé).
+
+
 ## v4 (experimental)
 
 v4 is a larger research iteration focused on learning efficiency and post-training,

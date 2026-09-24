@@ -19,10 +19,14 @@ import torch
 
 from frlm.model import PRESETS, ModelConfig, build_model
 from frlm.model_v3 import PRESETS_V3, ModelConfigV3, build_model_v3
+from frlm.model_v5 import PRESETS_V5, ModelConfigV5, Qwen4ExpLM
 from frlm.optim import build_optimizers
 
 
 def construire(preset: str, seq_len: int, vocab: int):
+    if preset in PRESETS_V5:
+        cfg = ModelConfigV5(vocab_size=vocab, max_seq_len=seq_len)
+        return Qwen4ExpLM(cfg), cfg
     if preset in PRESETS_V3:
         cfg = ModelConfigV3(**PRESETS_V3[preset])
         cfg.vocab_size = vocab
@@ -45,9 +49,13 @@ def mesurer(preset: str, a, batch_size: int, grad_accum: int) -> dict:
     n_params = model.num_params()
     n_ne = model.num_params(non_embedding=True)
     fpt = model.flops_per_token()
+    if preset in PRESETS_V5:
+        print("  v5 : MFU matriciel approximatif ; décider sur les tokens/s mesurés.")
 
-    opt_args = SimpleNamespace(optimizer="muon", lr=0.02, adam_lr=1.5e-3,
-                               beta1=0.9, beta2=0.95, weight_decay=0.05)
+    v5 = preset in PRESETS_V5
+    opt_args = SimpleNamespace(optimizer="muon", lr=0.002 if v5 else 0.02,
+                               adam_lr=0.0003 if v5 else 1.5e-3,
+                               beta1=0.9, beta2=0.95, weight_decay=0.1 if v5 else 0.05)
     opts, _ = build_optimizers(model, opt_args)
 
     if a.compile:
@@ -57,7 +65,7 @@ def mesurer(preset: str, a, batch_size: int, grad_accum: int) -> dict:
             print(f"  [!] compile indisponible ({e}) — eager")
 
     # pool de batchs aléatoires pré-chargés (la data ne doit pas fausser la mesure)
-    pool = [torch.randint(0, a.vocab_size, (batch_size, a.seq_len), device=device)
+    pool = [torch.randint(0, a.vocab_size, (batch_size, a.seq_len + 1), device=device)
             for _ in range(8)]
     tokens_step = batch_size * grad_accum * a.seq_len
 
@@ -132,7 +140,7 @@ def mesurer_avec_repli(preset: str, a) -> dict:
 def main():
     ap = argparse.ArgumentParser(description="Banc de vitesse d'entraînement v2/v3")
     ap.add_argument("--presets", nargs="+", default=["mini", "v3-mini", "v3-base"],
-                    choices=list(PRESETS) + list(PRESETS_V3))
+                    choices=list(PRESETS) + list(PRESETS_V3) + list(PRESETS_V5))
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--grad-accum", type=int, default=2)
     ap.add_argument("--seq-len", type=int, default=1024)

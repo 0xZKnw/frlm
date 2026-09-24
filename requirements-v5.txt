@@ -1,0 +1,10 @@
+# Environnement v5 séparé : ne change pas les dépendances des runs v4.
+torch==2.9.1
+transformers==5.17.0
+datasets==5.0.1
+rich==13.9.4
+# Formats et prétraitement utilisés pour les artefacts v5 déjà préparés.
+tokenizers==0.23.2
+numpy==2.5.3
+pyarrow==25.0.1
+huggingface-hub==1.33.0

@@ -149,8 +149,9 @@ def make_reasoning(rng: random.Random, direct_fraction: float = 0.68) -> dict:
         rationale = f"La chaîne donne {a} > {b} > {c}; le maximum est {a}."
         program = f"MAX({a}>{b}>{c})"
     elif schema == "discount":
-        price = rng.randint(4, 30) * 10
         rate = rng.choice((10, 20, 25, 50))
+        # Prix divisibles par 100 : aucune remise fractionnaire tronquée par //.
+        price = rng.randint(1, 8) * 100
         result = price * (100 - rate) // 100
         prompts = (
             f"Un article coûte {price} €. Après une réduction de {rate} %, quel est son nouveau prix ?",
@@ -424,7 +425,8 @@ def make_constraints_v45(rng: random.Random) -> dict:
         answer, program = ", ".join(words), "EXACT_LIST(3)"
     elif kind == 2:
         x = rng.randint(1, 9999)
-        prompt = f"Réponds en JSON compact avec les clés resultat et pair pour le nombre {x}."
+        prompt = (f"Pour le nombre {x}, réponds en JSON compact : resultat est son double "
+                  "et pair indique si le nombre initial est pair (booléen).")
         answer = '{"resultat":' + str(x * 2) + ',"pair":' + str(x % 2 == 0).lower() + '}'
         program = f"JSON(DOUBLE({x}),EVEN({x}))"
     elif kind == 3:

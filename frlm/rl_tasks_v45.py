@@ -14,6 +14,7 @@ from frlm.verifiers_v45 import AnswerSpec, VERIFIER_VERSION
 
 
 Split = Literal["train", "dev"]
+GENERATOR_VERSION = "rl-tasks-v45-2"
 CAPABILITY_WEIGHTS = {
     "reasoning_program": 0.40,
     "grounded": 0.15,
@@ -66,7 +67,7 @@ class TaskSpec:
 
 
 def _task_id(seed: int, schema: str, surface: str, prompt: str) -> str:
-    raw = f"v45|{seed}|{schema}|{surface}|{prompt}".encode("utf-8")
+    raw = f"{GENERATOR_VERSION}|{seed}|{schema}|{surface}|{prompt}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:20]
 
 
@@ -102,8 +103,10 @@ def _reasoning(rng: random.Random, seed: int, split: Split, difficulty: float,
         program = {"op": "solve_add", "offset": offset, "total": total}
     elif schema == "mean_three":
         result = rng.randint(2, scale)
-        delta = rng.randint(1, min(result, max(2, scale // 3)))
-        values = (result - delta, result, result + delta)
+        delta = rng.randint(1, max(2, scale // 3))
+        other = rng.randint(1, max(2, scale // 3))
+        values = [result + delta, result + other, result - delta - other]
+        rng.shuffle(values)
         template, sid = _surface(rng, split, (
             "Quelle est la moyenne arithmétique de {a}, {b} et {c} ?",
             "Trois mesures valent {a}, {b} et {c}. Donne leur moyenne.",
@@ -198,13 +201,18 @@ def _constraints(rng: random.Random, seed: int, split: Split, difficulty: float,
     if forced_schema not in (None, "constraint_number_only", "constraint_json"):
         raise ValueError(f"schéma constraints inconnu : {forced_schema}")
     if number_only:
-        prompt = f"Combien font {a} + {b} ? Réponds uniquement par le nombre."
+        prompt = (f"Addition à effectuer : {a} et {b}. Donne seulement l'entier obtenu."
+                  if split == "dev" else
+                  f"Combien font {a} + {b} ? Réponds uniquement par le nombre.")
         answer = AnswerSpec("integer", total, strict_number_only=True)
         schema, program = "constraint_number_only", {"op": "add", "args": [a, b], "format": "number"}
     else:
         value = {"operation": "addition", "resultat": total}
         prompt = (f"Calcule {a} + {b}. Réponds uniquement avec un objet JSON ayant exactement "
                   "les clés operation (texte) et resultat (entier).")
+        if split == "dev":
+            prompt = (f"Additionne {a} à {b} et fournis seulement un objet JSON : "
+                      "operation vaut addition et resultat contient la somme entière.")
         answer = AnswerSpec("json", value, json_schema={"operation": "string", "resultat": "integer"})
         schema, program = "constraint_json", {"op": "add", "args": [a, b], "format": "json"}
     sid = f"{split}:{rng.randrange(3 if split == 'train' else 2)}"
@@ -223,6 +231,10 @@ def _uncertainty(rng: random.Random, seed: int, split: Split, difficulty: float,
     prompt = (f"Deux avis officiels publiés au même instant se contredisent : le premier donne "
               f"le code {code_a}, le second le code {code_b}. Aucun avis n'est prioritaire. "
               "Quel code unique doit-on retenir ?")
+    if split == "dev":
+        prompt = (f"Les codes {code_a} et {code_b} figurent dans deux annonces officielles "
+                  "simultanées de même autorité. Sans critère pour les départager, "
+                  "peut-on désigner un code certain ?")
     sid = f"{split}:{rng.randrange(3 if split == 'train' else 2)}"
     return TaskSpec(_task_id(seed, "contradictory_sources", sid, prompt), "contradictory_sources",
                     sid, split, "uncertainty", difficulty, prompt, AnswerSpec("abstain"),
@@ -241,6 +253,10 @@ def _state(rng: random.Random, seed: int, split: Split, difficulty: float,
     prompt = (f"Conversation précédente : utilisateur : l'étiquette du dossier est {first}. "
               f"assistant : noté. utilisateur : remplace-la par {second}. assistant : fait. "
               f"utilisateur : correction finale, mets-la en {third}. Quelle est sa couleur actuelle ?")
+    if split == "dev":
+        prompt = (f"Historique d'un dossier : couleur initiale {first}, changement demandé "
+                  f"vers {second}, puis dernière correction vers {third}. "
+                  "Quelle couleur faut-il conserver après ces mises à jour ?")
     sid = f"{split}:{rng.randrange(3 if split == 'train' else 2)}"
     return TaskSpec(_task_id(seed, "state_update", sid, prompt), "state_update", sid, split,
                     "state_tracking", difficulty, prompt,

@@ -1,0 +1,303 @@
+"""Régressions v5 : formats, quotas, gradients, causalité et cache sur CPU."""
+import itertools
+import importlib.util
+import json
+from pathlib import Path
+import sqlite3
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import torch
+
+from frlm import config_from_dict, model_from_cfg
+from frlm import data as D
+from frlm.prepare_v5 import clean_document, encode_source, split_for, token_targets
+
+try:
+    from transformers import Qwen4ExpForCausalLM
+except ImportError:
+    Qwen4ExpForCausalLM = None
+
+
+class DataV5Tests(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("modal"), "SDK Modal optionnel")
+    def test_modal_command_budget_and_explicit_handoff(self):
+        from modal_v5 import command
+        for seconds in (0, -1, float("nan"), float("inf"), 21601):
+            with self.assertRaises(ValueError):
+                command("pretrain", 100, seconds)
+        for args in [("pilot", 0, 901), ("pretrain", 0, 900), ("sft", 100, 900)]:
+            with self.assertRaises(ValueError):
+                command(*args)
+        first = command("pretrain", 3000, 21600)
+        second = command("pretrain", 3000, 18000, "runs/fr-v5-qwen4exp/pretrain/ckpt_latest.pt")
+        self.assertEqual(first[first.index("--max-steps") + 1], second[second.index("--max-steps") + 1])
+        self.assertNotIn("--init-weights-only", second)
+        import modal_v5
+        with patch.object(modal_v5, "preflight") as cpu, patch.object(modal_v5, "execute") as gpu:
+            modal_v5.main()
+            cpu.remote.assert_called_once()
+            gpu.remote.assert_not_called()
+            modal_v5.main(go=True, check_only=True)
+            gpu.remote.assert_not_called()
+
+    @unittest.skipUnless(importlib.util.find_spec("pyarrow"), "pyarrow v5 optionnel")
+    def test_parquet_nested_messages(self):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from frlm.prepare_v5 import records
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "nested.parquet"
+            messages = [{"role": "user", "content": "Bonjour"}]
+            pq.write_table(pa.Table.from_pylist([{"messages": messages}]), path)
+            source = {"name": "scholar", "kind": "scholar", "columns": ["messages"],
+                      "files": ["data.parquet"], "revision": "pinned", "repo": "test/repo"}
+            with patch("huggingface_hub.hf_hub_download", return_value=str(path)):
+                self.assertEqual(list(records(source, Path(tmp), [])), [{"messages": messages}])
+
+    def test_sft_masks_reject_truncation_and_bad_roles(self):
+        from tokenizers import Tokenizer, models, trainers, pre_tokenizers
+        from frlm.prepare_sft_v5 import encode_conversation
+        tok = Tokenizer(models.BPE())
+        tok.pre_tokenizer = pre_tokenizers.ByteLevel()
+        tok.train_from_iterator(["Les fractions permettent de calculer un nombre."], trainers.BpeTrainer(
+            vocab_size=300, special_tokens=D.SPECIALS, initial_alphabet=pre_tokenizers.ByteLevel.alphabet()))
+        messages = [{"role": "user", "text": "Calcule deux plus deux."},
+                    {"role": "assistant", "text": "Deux plus deux font quatre."}]
+        encoded, _ = encode_conversation(tok, messages, 1024, "verified")
+        ids, mask, _ = encoded
+        self.assertEqual(ids[-1], 0)
+        self.assertEqual(mask[-1], 0)
+        self.assertEqual(mask[0], 0)
+        self.assertTrue(any(mask))
+        self.assertIsNone(encode_conversation(tok, messages, 4, "verified")[0])
+        self.assertIsNone(encode_conversation(tok, messages[::-1], 1024, "verified")[0])
+        messages[0]["text"] += D.IM_START
+        self.assertIsNone(encode_conversation(tok, messages, 1024, "verified")[0])
+
+    def test_quotas(self):
+        self.assertEqual(token_targets(7, [5, 3, 2]), [4, 2, 1])
+        self.assertEqual(token_targets(10, [5, 3, 2]), [5, 3, 2])
+        for total, weights in itertools.product(range(1, 30), itertools.product(range(1, 4), repeat=3)):
+            counts = token_targets(total, list(weights))
+            self.assertEqual(sum(counts), total)
+            self.assertTrue(all(abs(n - total * w / sum(weights)) < 1 for n, w in zip(counts, weights)))
+        for total, weights in [(0, [1]), (3, []), (3, [-1, 2])]:
+            with self.assertRaises(ValueError):
+                token_targets(total, weights)
+
+    def test_filter_and_group(self):
+        src = {"name": "web_hq"}
+        text = "Voici une explication française assez longue et utile pour comprendre les fractions. " * 4
+        self.assertEqual(clean_document({"text": text, "id": "doc"}, src)[1], "doc")
+        for bad in ["court", text + D.IM_START, text + "buy cheap essays", "\ufffd" * 300]:
+            self.assertIsNone(clean_document({"text": bad}, src))
+        self.assertEqual(split_for("doc"), split_for("doc"))
+        self.assertEqual({split_for(str(i)) for i in range(10000)}, {"train", "val", "sealed"})
+
+    def test_encoding_dedup_resume_and_corruption(self):
+        from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+        tok = Tokenizer(models.BPE())
+        tok.pre_tokenizer = pre_tokenizers.ByteLevel()
+        text = "Une explication utile sur les nombres et les fractions permet de calculer correctement. " * 4
+        tok.train_from_iterator([text], trainers.BpeTrainer(vocab_size=300, special_tokens=D.SPECIALS,
+                                initial_alphabet=pre_tokenizers.ByteLevel.alphabet()))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tok.save(str(root / "tokenizer.json"))
+            db = sqlite3.connect(root / "dedup.sqlite")
+            db.execute("CREATE TABLE seen (fingerprint BLOB PRIMARY KEY, group_key TEXT UNIQUE, source TEXT)")
+            src = {"name": "web_hq"}
+            rows = [{"text": text, "id": "doc"}, {"text": text, "id": "duplicate"},
+                    {"text": text.replace("fractions", "multiplications"), "id": "other"}]
+            target = len(tok.encode(text).ids) + 2
+            with patch("frlm.prepare_v5.records", return_value=iter(rows)):
+                report = encode_source(root, src, target, tok, db)
+            self.assertEqual(report["duplicates"], 1)
+            self.assertEqual(report["documents"], 2)
+            self.assertEqual(encode_source(root, src, target, tok, db), json.loads((root / "shards/web_hq/report.json").read_text()))
+            (root / "shards/web_hq/train.bin").write_bytes(b"bad")
+            with self.assertRaises(ValueError):
+                encode_source(root, src, target, tok, db)
+            db.close()
+
+
+@unittest.skipUnless(Qwen4ExpForCausalLM, "installer requirements-v5.txt")
+class ModelV5Tests(unittest.TestCase):
+    def setUp(self):
+        from frlm.model_v5 import ModelConfigV5
+        torch.set_num_threads(1)
+        torch.manual_seed(5501)
+        self.cfg = ModelConfigV5(vocab_size=300, d_model=32, n_layer=4, n_head=2,
+                                n_kv_head=1, head_dim=8, d_ff=16, linear_heads=2,
+                                linear_key_heads=1, ngram_vocab=31, num_experts=2,
+                                experts_per_token=1, max_seq_len=32)
+        self.model = model_from_cfg(config_from_dict(self.cfg.to_dict()))
+        self.x = torch.randint(5, 300, (1, 12))
+
+    def test_gradient_mask_and_already_shifted_targets(self):
+        targets = self.x.roll(-1, 1)
+        mask = torch.zeros_like(targets)
+        mask[:, 4:9] = 1
+        self.model.eval()
+        logits, loss, _ = self.model(self.x, targets, mask)
+        expected = torch.nn.functional.cross_entropy(logits[mask.bool()].float(), targets[mask.bool()])
+        torch.testing.assert_close(loss, expected)
+        _, summed, _ = self.model(self.x, targets, mask, loss_reduction="sum")
+        torch.testing.assert_close(summed, loss * mask.sum())
+        self.model.train()
+        _, loss, _ = self.model(self.x, targets, mask)
+        loss.backward()
+        router = self.model.hf.model.layers[0].mlp.gate.weight
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreater(float(router.grad.norm()), 0)
+
+    def test_causality_cache_and_roundtrip(self):
+        self.model.eval()
+        with torch.no_grad():
+            full = self.model(self.x)[0]
+            changed = self.x.clone()
+            changed[:, 9:] = 42
+            torch.testing.assert_close(full[:, :9], self.model(changed)[0][:, :9])
+            cache = self.model._alloc_caches(1, 32, "cpu", torch.float32)
+            self.model._forward_cached(self.x[:, :8], cache, 0)
+            for i in range(8, 12):
+                cached = self.model._forward_cached(self.x[:, i:i+1], cache, i)
+                torch.testing.assert_close(cached[:, -1], full[:, i], atol=1e-6, rtol=1e-5)
+            restored = model_from_cfg(config_from_dict(self.cfg.to_dict())).eval()
+            restored.load_state_dict(self.model.state_dict())
+            torch.testing.assert_close(restored(self.x)[0], full)
+
+    def test_parameter_budget_and_context_guard(self):
+        from frlm.model_v5 import ModelConfigV5
+        with torch.device("meta"):
+            full = model_from_cfg(ModelConfigV5())
+        self.assertEqual(full.num_params(), 350_011_504)
+        with self.assertRaises(ValueError):
+            ModelConfigV5(max_seq_len=4096).hf_config()
+
+    def test_optimizer_experts_and_exact_reload(self):
+        from frlm.optim import build_optimizers
+        from run import TrainConfig
+        cfg = TrainConfig(optimizer="muon", lr=0.001, adam_lr=0.0001)
+        opts, _ = build_optimizers(self.model, cfg)
+        expert = self.model.hf.model.layers[0].mlp.experts.gate_up_proj
+        router = self.model.hf.model.layers[0].mlp.gate.weight
+        self.assertTrue(any(expert is p for g in opts[0].param_groups for p in g["params"]))
+        self.assertTrue(any(router is p for g in opts[1].param_groups for p in g["params"]))
+        _, loss, _ = self.model(self.x, self.x.roll(-1, 1))
+        loss.backward()
+        for opt in opts:
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+        import copy
+        resumed = model_from_cfg(self.cfg)
+        resumed.load_state_dict(self.model.state_dict())
+        resumed_opts, _ = build_optimizers(resumed, cfg)
+        for opt, previous in zip(resumed_opts, opts):
+            opt.load_state_dict(copy.deepcopy(previous.state_dict()))
+        for model, optimizers in [(self.model, opts), (resumed, resumed_opts)]:
+            model(self.x, self.x.roll(-1, 1))[1].backward()
+            for opt in optimizers:
+                opt.step()
+        for a, b in zip(self.model.parameters(), resumed.parameters()):
+            torch.testing.assert_close(a, b, atol=0, rtol=0)
+
+    def test_trainer_handoff_preserves_global_schedule(self):
+        import contextlib
+        from dataclasses import asdict
+        import io
+        import numpy as np
+        from tokenizers import Tokenizer, models, trainers, pre_tokenizers
+        from frlm.prepare_v5 import sha256, write_json
+        from run import TrainConfig, Trainer
+        tok = Tokenizer(models.BPE())
+        tok.pre_tokenizer = pre_tokenizers.ByteLevel()
+        tok.train_from_iterator(["Les nombres et les fractions."], trainers.BpeTrainer(
+            vocab_size=300, special_tokens=D.SPECIALS, initial_alphabet=pre_tokenizers.ByteLevel.alphabet()))
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(tmp)
+            tok.save(str(root / "tokenizer.json"))
+            for split in ("train", "val", "sealed"):
+                np.random.default_rng(55).integers(5, tok.get_vocab_size(), 3000, dtype=np.uint16).tofile(root / f"{split}.bin")
+            artifacts = {p.name: {"bytes": p.stat().st_size, "sha256": sha256(p)}
+                         for p in root.iterdir()}
+            write_json(root / "manifest.json", {"artifacts": artifacts})
+            write_json(root / "meta.json", {"manifest_sha256": sha256(root / "manifest.json")})
+            preset = asdict(self.cfg)
+            preset["max_seq_len"] = 128
+            cfg = dict(data_dir=str(root), out_dir=str(root / "runs"), preset="v5-qwen4exp-350m",
+                       batch_size=1, grad_accum=1, seq_len=12, max_steps=3, warmup=2,
+                       dtype="float32", device="cpu", compile=False, sample_every=0,
+                       eval_every=2, eval_iters=1, optimizer="adamw", lr=1e-4)
+            with patch.dict("run.PRESETS_V5", {"v5-qwen4exp-350m": preset}):
+                uninterrupted = Trainer(TrainConfig(run_name="whole", **cfg))
+                uninterrupted.train()
+                interrupted = Trainer(TrainConfig(run_name="split", stop_after_seconds=1e-9, **cfg))
+                interrupted.train()
+                self.assertEqual(interrupted.step, 1)
+                checkpoint = root / "runs/split/pretrain/ckpt_latest.pt"
+                resumed = Trainer(TrainConfig(run_name="split", **cfg), resume=str(checkpoint))
+                self.assertEqual(resumed.cfg.max_steps, 3)
+                resumed.train()
+                for a, b in zip(uninterrupted.model.parameters(), resumed.model.parameters()):
+                    torch.testing.assert_close(a, b, atol=0, rtol=0)
+                altered = cfg | {"max_steps": 4}
+                with self.assertRaisesRegex(ValueError, "reprise v5 non exacte"):
+                    Trainer(TrainConfig(run_name="split", **altered), resume=str(checkpoint))
+                # Le même contrat est exécuté avant une allocation Modal.
+                import shlex
+                from frlm.modal_preflight import _check_command
+                from frlm.model_v5 import validate_resume
+                cli = ["python", "run.py", "train", "--preset", "v5-qwen4exp-350m",
+                       "--data-dir", str(root), "--seq-len", "12", "--batch-size", "1",
+                       "--grad-accum", "1", "--max-steps", "3", "--warmup", "2",
+                       "--dtype", "float32", "--optimizer", "adamw", "--lr", "0.0001",
+                       "--resume", str(checkpoint)]
+                _check_command(shlex.join(cli), root)
+                cli[cli.index("--max-steps") + 1] = "4"
+                with self.assertRaisesRegex(ValueError, "reprise v5 non exacte"):
+                    _check_command(shlex.join(cli), root)
+                payload = torch.load(checkpoint, weights_only=False)
+                with self.assertRaisesRegex(ValueError, "état complet"):
+                    validate_resume(payload, resumed.cfg, resumed.mcfg.to_dict(),
+                                    resumed.data_manifest_sha256, resumed.tokenizer_sha256, None, True)
+
+                from frlm.prepare_sft_v5 import prepare, audit
+                import hashlib
+                groups = {}
+                for i in range(1000):
+                    bucket = int.from_bytes(hashlib.sha256(str(i).encode()).digest()[:8], "big") % 100
+                    groups.setdefault("val" if bucket == 0 else "sealed" if bucket == 1 else "train", str(i))
+                rows = [([{"role": "user", "text": f"Calcule le nombre {i} plus deux."},
+                          {"role": "assistant", "text": f"Le résultat est {i + 2}."}], groups[s])
+                        for i, s in enumerate(("val", "sealed", "train"))]
+                recipe = {"recipe": "v5-sft-20260924", "max_seq_len": 128,
+                          "target_supervised": 1, "sources": [{"name": "verified", "weight": 100}]}
+                with patch("frlm.prepare_sft_v5.conversations", return_value=iter(rows)):
+                    prepare(root, recipe)
+                sft_cfg = cfg | {"stage": "sft", "sft_recipe": "v5", "seq_len": 128,
+                                 "stop_after_seconds": 1e-9}
+                sft = Trainer(TrainConfig(run_name="split", **sft_cfg), resume=str(checkpoint))
+                self.assertEqual(sft.step, 0)
+                sft.train()
+                self.assertEqual(sft.step, 1)
+                (root / "sft_v5_val.mask").write_bytes(b"bad")
+                with self.assertRaisesRegex(ValueError, "fusionné altéré"):
+                    audit(root)
+                from frlm.export_v5 import export_hf
+                from transformers import AutoTokenizer, GenerationConfig
+                exported = root / "hf"
+                export_hf(checkpoint, root / "tokenizer.json", exported)
+                fast = AutoTokenizer.from_pretrained(exported, local_files_only=True)
+                messages = [{"role": "user", "content": "  Bonjour !  "},
+                            {"role": "assistant", "content": "  Bonjour.  "}]
+                self.assertEqual(fast.apply_chat_template(messages, tokenize=False), D.render_chat(messages))
+                self.assertEqual(GenerationConfig.from_pretrained(exported).eos_token_id, [0, 2])
+                with self.assertRaises(FileExistsError):
+                    export_hf(checkpoint, root / "tokenizer.json", exported)
+
+
+if __name__ == "__main__":
+    unittest.main()

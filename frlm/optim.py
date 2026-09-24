@@ -128,12 +128,15 @@ def build_optimizers(model, args) -> tuple[list[torch.optim.Optimizer], dict]:
     - conv depthwise DeltaNet (3D), A_log, gains de norme classiques -> AdamW sans decay
     """
     muon_params, adam_decay, adam_nodecay = [], [], []
+    is_v5 = getattr(getattr(model, "cfg", None), "num_experts", None) is not None
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
         if "embed" in name or "lm_head" in name:   # embed_tokens, value_embeds, lm_head
             adam_decay.append(p)
-        elif p.ndim == 2 and "conv" not in name:
+        elif is_v5 and ".mlp.gate.weight" in name:
+            adam_nodecay.append(p)  # routeur : conserver la mise à l'échelle Adam
+        elif (p.ndim == 2 and "conv" not in name) or (is_v5 and p.ndim == 3 and ".experts." in name):
             muon_params.append(p)
         elif p.ndim == 1 and "norm" in name.lower() and getattr(
                 _owner_module(model, name), "zero_centered", False):

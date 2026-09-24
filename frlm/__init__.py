@@ -20,6 +20,9 @@ def config_from_dict(d: dict):
     Les checkpoints v3 portent {"arch": "v3"} (écrit par ModelConfigV3.to_dict) ;
     les checkpoints v2 antérieurs n'ont pas de clé arch.
     """
+    if d.get("arch") == "v5-qwen4exp":
+        from frlm.model_v5 import ModelConfigV5
+        return ModelConfigV5.from_dict(d)
     if d.get("arch") == "v3":
         from frlm.model_v3 import ModelConfigV3
         return ModelConfigV3.from_dict(d)
@@ -29,6 +32,9 @@ def config_from_dict(d: dict):
 
 def model_from_cfg(mcfg):
     """Construit le bon modèle (v2 ou v3) depuis une config déjà typée."""
+    if mcfg.to_dict().get("arch") == "v5-qwen4exp":
+        from frlm.model_v5 import Qwen4ExpLM
+        return Qwen4ExpLM(mcfg)
     from frlm.model_v3 import ModelConfigV3, build_model_v3
     if isinstance(mcfg, ModelConfigV3):
         return build_model_v3(mcfg)

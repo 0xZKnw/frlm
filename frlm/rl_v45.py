@@ -29,7 +29,7 @@ from frlm import data as D
 from frlm.rl_engine_v45 import (
     RolloutEngine, clone_reference, load_policy, resolve_checkpoint, resolve_tokenizer,
 )
-from frlm.rl_tasks_v45 import CAPABILITY_WEIGHTS, SCHEMAS_BY_CAPABILITY, TaskSpec, make_task
+from frlm.rl_tasks_v45 import CAPABILITY_WEIGHTS, GENERATOR_VERSION, SCHEMAS_BY_CAPABILITY, TaskSpec, make_task
 from frlm.verifiers_v45 import VERIFIER_VERSION, final_text, verify
 
 
@@ -46,7 +46,7 @@ class RLVRConfig:
     init_ckpt: str = "best"
     ref_stage: str = "sft"
     ref_ckpt: str = "best"
-    profile_name: str = "profile.json"
+    profile_name: str = "profile_v2.json"
     anchor_resume_reference: bool = True
     accepted_updates: int = 200
     prompts_per_update: int = 3
@@ -195,6 +195,8 @@ class RLVRTrainer:
             )
         self.profile = (json.loads(profile_path.read_text(encoding="utf-8"))
                         if profile_path.is_file() else None)
+        if self.profile and self.profile.get("config", {}).get("generator_version") != GENERATOR_VERSION:
+            raise ValueError("profil issu d'un ancien générateur : refaire rl-profile-v45 dans un nouveau fichier")
         self.profile_sha256 = (hashlib.sha256(profile_path.read_bytes()).hexdigest()
                                if profile_path.is_file() else None)
         self.frontier_specs, self.bridge_specs = self._profile_curriculum()
@@ -1300,8 +1302,8 @@ class RLVRTrainer:
 def _prepare_resume_profile(args) -> str:
     """Crée/réutilise automatiquement un pass@32 lié au checkpoint de phase 2."""
     if not args.resume or args.keep_reference:
-        return args.profile_name or "profile.json"
-    profile_name = args.profile_name or "profile_phase2.json"
+        return args.profile_name or "profile_v2.json"
+    profile_name = args.profile_name or "profile_phase2_v2.json"
     if args.no_refresh_profile:
         return profile_name
     run_dir = Path(args.out_dir) / args.run
@@ -1316,7 +1318,8 @@ def _prepare_resume_profile(args) -> str:
         source = existing.get("checkpoint", {})
         profile_cfg = existing.get("config", {})
         same_recipe = (
-            int(profile_cfg.get("tasks", -1)) == args.eval_tasks
+            profile_cfg.get("generator_version") == GENERATOR_VERSION
+            and int(profile_cfg.get("tasks", -1)) == args.eval_tasks
             and int(profile_cfg.get("k", -1)) == 6
             and int(profile_cfg.get("frontier_k", -1)) == 32
             and int(profile_cfg.get("max_new", -1)) == args.max_new

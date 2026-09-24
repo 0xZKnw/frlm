@@ -964,10 +964,16 @@ class ConversationCorpus(BinCorpus):
         chunk_size = 10_000_000
         for start in range(0, self.n_tokens, chunk_size):
             chunk = np.asarray(self.tokens[start:start + chunk_size])
+            if np.any(self.mask[start:start + chunk_size] > 1):
+                raise ValueError(f"masque SFT non binaire dans {bin_path}")
             eot_positions.append(np.flatnonzero(chunk == 0).astype(np.int64) + start)
         ends = np.concatenate(eot_positions) + 1 if eot_positions else np.empty(0, np.int64)
         starts = np.concatenate((np.array([0], dtype=np.int64), ends[:-1]))
         lengths = ends - starts
+        if not len(ends) or int(ends[-1]) != self.n_tokens:
+            raise ValueError(f"conversation finale non terminée dans {bin_path}")
+        if np.any(self.mask[starts]) or np.any(self.mask[ends - 1]):
+            raise ValueError(f"frontière de conversation supervisée dans {bin_path}")
         valid = (lengths >= 2) & (lengths <= seq_len + 1)
         self.conversation_starts = starts[valid]
         self.conversation_ends = ends[valid]
@@ -1002,12 +1008,19 @@ class ConversationCorpus(BinCorpus):
         return xt, yt, mt
 
 
+def token_sampling_weight(target: float, conversations: int, supervised: int) -> float:
+    """Probabilité de conversation donnant la proportion de tokens visée en espérance."""
+    if not np.isfinite(target) or target <= 0 or conversations <= 0 or supervised <= 0:
+        raise ValueError("poids ou compteurs de tokens supervisés invalides")
+    return target * conversations / supervised
+
+
 class SourceMixtureCorpus:
     """Échantillonne explicitement plusieurs bins avec des probabilités stables.
 
-    Le builder SFT v4.4 conserve un bin par capacité. Ce chargeur empêche la taille
-    moyenne des conversations de modifier silencieusement le mix : chaque ligne du
-    batch choisit d'abord une capacité, puis un document dans son corpus.
+    Chaque ligne choisit une capacité puis un document : les poids désignent des
+    proportions de conversations. Pour viser des tokens assistant, les convertir
+    avec ``token_sampling_weight`` avant de construire le mélange.
     """
 
     def __init__(self, corpora: list[tuple[str, BinCorpus, float]]):

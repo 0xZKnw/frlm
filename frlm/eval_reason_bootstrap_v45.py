@@ -8,23 +8,26 @@ de louer un GPU distant.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import itertools
 import json
+import math
 import random
 import re
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import torch
 
 from frlm import config_from_dict, data as D, model_from_cfg
+from frlm.reason_bootstrap_v45 import FINAL_SPLIT
+from frlm.verifiers_v45 import AnswerSpec, final_text, verify
 
 
 BASE_FEWSHOT = (
     "Question : Calcule la somme de 8 et 5. Réponds uniquement par le nombre final.\n"
     "Réponse : 13\n\n"
-    "Question : Une trace contient une erreur. Étape 1 : r1 = 4 × 3 = 11. "
-    "Donne uniquement le numéro de la première étape fausse.\nRéponse : 1\n\n"
 )
 
 
@@ -44,22 +47,95 @@ def _load_jsonl(path: Path) -> list[dict]:
         return [json.loads(line) for line in stream if line.strip()]
 
 
-def _final_zone(text: str) -> str:
-    text = text.split("<|im_end|>", 1)[0].split("<|endoftext|>", 1)[0]
-    if "</think>" in text:
-        text = text.rsplit("</think>", 1)[1]
-    explicit = list(re.finditer(r"(?i)(?:réponse|conclusion)\s*:\s*", text))
-    return text[explicit[-1].end():].strip() if explicit else text.strip()
-
-
 def score_output(record: dict, output: str) -> bool:
-    zone = _final_zone(output)
     target = str(record["target"]).strip()
     if record["objective"] == "order_steps":
-        normalized = re.sub(r"[^A-Z,]", "", zone.upper())
-        return normalized == target
-    numbers = re.findall(r"(?<![\w])[-+]?\d+(?![\w])", zone.replace("−", "-"))
-    return bool(numbers) and numbers[-1] == target and len(set(numbers)) == 1
+        normalized = re.sub(r"\s+", "", final_text(output).upper())
+        return normalized in (record.get("valid_orders") or [target])
+    strict = record["objective"] in ("number_only", "find_error")
+    return verify(AnswerSpec("integer" if strict else "rational", int(target),
+                             strict_number_only=strict), output).primary_success
+
+
+def stratified_sample(records: list[dict], count: int, seed: int) -> list[dict]:
+    """Chaque objectif puis difficulté reçoit un tour, sans préfixe aléatoire biaisé."""
+    if count <= 0 or count > len(records):
+        raise ValueError("nombre de tâches positif et <= taille du manifeste requis")
+    rng = random.Random(seed)
+    buckets = defaultdict(list)
+    for record in records:
+        buckets[(record["objective"], record["difficulty"])].append(record)
+    for values in buckets.values():
+        rng.shuffle(values)
+    keys = sorted(buckets)
+    objectives = sorted({key[0] for key in keys})
+    minimum = len(objectives) * max(sum(key[0] == objective for key in keys)
+                                    for objective in objectives)
+    if count < minimum:
+        raise ValueError(f"au moins {minimum} tâches pour couvrir objectifs/difficultés à poids égal")
+    # Répartir les positions d'erreur dans chaque strate, même pour un petit profil.
+    for key in keys:
+        if key[0] == "find_error":
+            positions = defaultdict(list)
+            for record in buckets[key]:
+                positions[record["target"]].append(record)
+            buckets[key] = [row for group in itertools.zip_longest(
+                *(positions[pos] for pos in sorted(positions))) for row in group if row]
+    selected = []
+    turns = Counter()
+    while len(selected) < count:
+        for objective in objectives:
+            available = [key for key in keys if key[0] == objective and buckets[key]]
+            if available and len(selected) < count:
+                key = available[turns[objective] % len(available)]
+                selected.append(buckets[key].pop(0))
+                turns[objective] += 1
+    return selected
+
+
+def baseline_report(records: list[dict], seed: int = 455_932, k: int = 4) -> dict:
+    """Constantes fixes, oracle majoritaire descriptif et hasard sans accès à la cible."""
+    groups = defaultdict(list)
+    for row in records:
+        for key in (f"objective:{row['objective']}",
+                    f"objective:{row['objective']}/{row['difficulty']}"):
+            groups[key].append(row)
+    report = {}
+    for key, rows in sorted(groups.items()):
+        rng = random.Random(f"{seed}:{key}")
+        objective = rows[0]["objective"]
+        constants = (["1", "2", "3"] if objective == "find_error" else
+                     ["A,B", "B,A", "A,B,C", "B,A,C", "C,B,A"] if objective == "order_steps"
+                     else ["0", "1", "-1"])
+        random_hits = 0
+        expected = expected_k = 0.0
+        for row in rows:
+            n = row["operations"]
+            if objective == "order_steps":
+                labels = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:n])
+                rng.shuffle(labels)
+                guess = ",".join(labels)
+                probability = len(row.get("valid_orders") or [row["target"]]) / math.factorial(n)
+            elif objective == "find_error":
+                guess, probability = str(rng.randint(1, n)), 1 / n
+            else:
+                guess, probability = str(rng.randint(-600, 600)), 1 / 1201
+            random_hits += score_output(row, guess)
+            expected += probability
+            expected_k += 1 - (1 - probability) ** k
+        # Calculé a posteriori : ce plafond de constante n'est PAS une baseline apprise.
+        candidates = {row["target"] for row in rows}
+        best = max(sorted(candidates), key=lambda value: sum(score_output(row, value) for row in rows))
+        report[key] = {
+            "tasks": len(rows), "target_counts": dict(Counter(row["target"] for row in rows)),
+            "fixed_constant_hits": {value: sum(score_output(row, value) for row in rows)
+                                    for value in constants},
+            "majority_oracle": {"answer": best,
+                                "hits": sum(score_output(row, best) for row in rows)},
+            "random_hits": random_hits, "random_expected_rate": expected / len(rows),
+            f"random_expected_pass@{k}": expected_k / len(rows),
+        }
+    return report
 
 
 class Sampler:
@@ -80,6 +156,7 @@ class Sampler:
             "checkpoint": str(checkpoint), "step": int(payload.get("step", -1)),
             "phase": payload.get("phase", checkpoint.parent.name),
             "protocol": protocol, "dtype": str(torch_dtype),
+            "base_fewshot": BASE_FEWSHOT if protocol == "base" else None,
         }
 
     def _prompt(self, question: str) -> str:
@@ -106,20 +183,44 @@ class Sampler:
 
 def profile(args) -> dict:
     root = Path(args.data_dir)
+    splits = tuple(part.strip() for part in args.splits.split(",") if part.strip())
+    if not splits or len(splits) != len(set(splits)) or args.k < 1:
+        raise ValueError("splits distincts non vides et k >= 1 requis")
+    if FINAL_SPLIT in splits and (not args.final_eval or len(splits) != 1):
+        raise ValueError("le test final exige --final-eval --splits final_sealed après gel du modèle")
+    if FINAL_SPLIT in splits and getattr(args, "baselines_only", False):
+        raise ValueError("les baselines de développement ne consultent pas le test final")
+    destination = (Path(args.report) if args.report else Path("bench/reports") /
+                   f"reason45c_{args.run}_{args.stage}_{Path(args.ckpt).stem}.json")
+    if destination.exists():
+        raise FileExistsError(f"rapport existant préservé : {destination}")
+    section = json.loads((root / "meta.json").read_text(encoding="utf-8"))["reason_bootstrap_v45c"]
+    rows = []
+    for split in splits:
+        path = root / section["eval_manifests"][split]
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != section["manifest_sha256"][split]:
+            raise ValueError(f"manifeste modifié : {split}")
+        rows.extend(stratified_sample(_load_jsonl(path), args.tasks,
+                                     args.seed ^ sum(map(ord, split))))
+    if getattr(args, "baselines_only", False):
+        report = {"schema": "frlm-reason-baselines-3", "recipe": section["recipe"],
+                  "model_evaluated": False, "manifest_sha256": section["manifest_sha256"],
+                  "settings": {"splits": splits, "tasks_per_split": args.tasks,
+                               "seed": args.seed, "k": args.k},
+                  "baselines": baseline_report(rows, args.seed, args.k)}
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("x", encoding="utf-8") as stream:
+            json.dump(report, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        print(f"[ok] Baselines CPU sauvegardées : {destination}")
+        return report
     checkpoint = _resolve_checkpoint(Path(args.out_dir) / args.run,
                                      args.stage, args.ckpt)
     protocol = args.protocol
     if protocol == "auto":
         protocol = "chat" if args.stage not in ("pretrain", "mid") else "base"
     sampler = Sampler(checkpoint, root, args.device, args.dtype, protocol)
-    splits = tuple(part.strip() for part in args.splits.split(",") if part.strip())
-    rows: list[dict] = []
-    for split in splits:
-        path = root / "raw" / f"reason_bootstrap_v45_{split}.jsonl"
-        candidates = _load_jsonl(path)
-        rng = random.Random(args.seed ^ sum(map(ord, split)))
-        rng.shuffle(candidates)
-        rows.extend(candidates[:args.tasks])
 
     started = time.perf_counter()
     counters = defaultdict(lambda: {"tasks": 0, "greedy": 0, "pass_k": 0,
@@ -136,7 +237,8 @@ def profile(args) -> dict:
                                     args.max_new, greedy=False)
             samples.append({"ok": score_output(record, text), "text": text})
         pass_k = any(sample["ok"] for sample in samples)
-        for key in (record["split"], f"objective:{record['objective']}", "macro"):
+        for key in (record["split"], f"objective:{record['objective']}",
+                    f"objective:{record['objective']}/{record['difficulty']}", "micro"):
             bucket = counters[key]
             bucket["tasks"] += 1
             bucket["greedy"] += int(greedy_ok)
@@ -144,11 +246,12 @@ def profile(args) -> dict:
             bucket["samples"] += len(samples)
             bucket["sample_success"] += sum(int(sample["ok"]) for sample in samples)
         details.append({"id": record["id"], "split": record["split"],
+                        "prompt": record["prompt"], "difficulty": record["difficulty"],
                         "objective": record["objective"], "target": record["target"],
                         "greedy_ok": greedy_ok, "greedy_text": greedy_text,
                         "pass_k": pass_k, "samples": samples})
         if index == 1 or index % 10 == 0 or index == len(rows):
-            done = counters["macro"]
+            done = counters["micro"]
             print(f"profil {index}/{len(rows)} · greedy {done['greedy']}/{done['tasks']} "
                   f"· pass@{args.k} {done['pass_k']}/{done['tasks']}", flush=True)
 
@@ -160,19 +263,21 @@ def profile(args) -> dict:
                         f"pass@{args.k}": value["pass_k"] / tasks,
                         "sample_success_rate": value["sample_success"] / samples}
     report = {
-        "schema": "frlm-reason-bootstrap-profile-1", "model": sampler.description,
+        "schema": "frlm-reason-bootstrap-profile-3", "model": sampler.description,
+        "recipe": section["recipe"], "manifest_sha256": section["manifest_sha256"],
+        "baselines": baseline_report(rows, args.seed, args.k),
         "settings": {"splits": splits, "tasks_per_split": args.tasks,
-                     "k": args.k, "max_new": args.max_new, "seed": args.seed},
+                     "k": args.k, "max_new": args.max_new, "seed": args.seed,
+                     "sampling": "stratified_objective_operations", "final_eval": args.final_eval,
+                     "temperature": 0.75, "top_k": 40, "top_p": 0.95,
+                     "repetition_penalty": 1.05},
         "elapsed_seconds": round(time.perf_counter() - started, 2),
         "metrics": metrics, "details": details,
     }
-    destination = (Path(args.report) if args.report else
-                   Path("bench/reports") /
-                   f"reason_bootstrap_{args.run}_{args.stage}_{args.ckpt}.json")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[ok] Profil sauvegardé : {destination}")
-    for key in (*splits, "macro"):
+    for key in sorted(metrics):
         metric = metrics[key]
         print(f"  {key:18s} greedy {metric['greedy']}/{metric['tasks']} · "
               f"pass@{args.k} {metric['pass_k']}/{metric['tasks']} · "
@@ -189,6 +294,9 @@ def main() -> None:
     parser.add_argument("--ckpt", default="best")
     parser.add_argument("--protocol", choices=("auto", "base", "chat"), default="auto")
     parser.add_argument("--splits", default="iid,surface_holdout,structure_holdout")
+    parser.add_argument("--final-eval", action="store_true")
+    parser.add_argument("--baselines-only", action="store_true",
+                        help="calcule les baselines CPU sans charger de checkpoint")
     parser.add_argument("--tasks", type=int, default=30)
     parser.add_argument("-k", type=int, default=4)
     parser.add_argument("--max-new", type=int, default=96)

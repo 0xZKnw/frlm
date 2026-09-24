@@ -5,6 +5,9 @@ data-v2/
 # v4 : garder seulement les petits artefacts reproductibles explicitement suivis
 # (tokenizer, meta et pools RLAIF), jamais les corpus bruts locaux.
 data-v4/raw/
+data-v5/
+.venv-v5/
+exports/
 runs/
 __pycache__/
 *.pt

@@ -253,7 +253,7 @@ class TaskTests(unittest.TestCase):
             )
             with patch("frlm.rl_profile_v45.profile") as generate:
                 name = _prepare_resume_profile(args)
-            self.assertEqual(name, "profile_phase2.json")
+            self.assertEqual(name, "profile_phase2_v2.json")
             self.assertEqual(generate.call_args.args[3:5], ("rlvr-v45", "best"))
 
     def test_profileur_ecrit_dans_le_nouveau_stage(self):
