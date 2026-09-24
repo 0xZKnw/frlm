@@ -90,3 +90,20 @@ Les réglages d'entraînement, benchmarks et contrôles CUDA/cloud restent non
 exécutés. Le petit pilote chiffré désormais proposé concerne uniquement la v5 :
 H100, 3 updates de chauffe et 10 mesurées, enveloppe initiale de 2 $ incluant
 préflight/démarrage, **seulement après « go »**.
+
+## Publication GitHub et correction de portabilité
+
+Le push demandé ensuite a publié `98120f6` sur main. Le premier run GitHub
+`36039297989` a révélé un accès inutile à `/root/app` dans `with_gpu_peak` :
+construire une commande appelait le résolveur de fichiers distants. Le runner
+Linux non privilégié levait `PermissionError`, absent lors du test macOS.
+La construction de commande analyse maintenant uniquement les arguments.
+
+Le test avec `Path.stat` interdit reproduit l'échec avant correction et réussit
+après. Les deux suites locales repassent : 83 tests, dont 7 sauts attendus dans
+l'environnement historique. Le contrat de commande couvre quatre modes et
+un profileur, idempotence comprise, pour tous les pics entiers de 1 à 2000 :
+vérification exhaustive finie réussie. CrossHair, 15 s par condition, retourne
+`Not confirmed` sans contre-exemple : aucune preuve complète revendiquée.
+La CI est relancée par le commit correctif ; son résultat est consultable dans
+[GitHub Actions](https://github.com/0xZKnw/frlm/actions/workflows/cpu.yml).

@@ -15,7 +15,9 @@ def _command_parts(cmd: str) -> list[str]:
 
 def with_gpu_peak(cmd: str, peak: float) -> str:
     parts = _command_parts(cmd)
-    stage, _, _ = _required_files(cmd)
+    # Construire la commande localement ne doit pas sonder le disque distant.
+    stage = next((parts[i + 1] for i, part in enumerate(parts[:-1])
+                  if Path(part).name == "run.py"), None)
     if "--gpu-peak-tflops" not in parts and (
             stage in ("train", "mid", "sft") or "frlm.bench_speed" in parts):
         return cmd + f" --gpu-peak-tflops {peak}"

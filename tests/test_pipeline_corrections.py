@@ -406,7 +406,8 @@ class PipelineIntegration(unittest.TestCase):
             _, files, _ = _required_files(f'python run.py sft {base} --resume latest', root)
             self.assertIn(root / 'mid_train.bin', files)
 
-    def test_wrapper_n_ajoute_pas_un_argument_train_au_profileur(self):
+    @patch('pathlib.Path.stat', side_effect=PermissionError('aucun accès disque attendu'))
+    def test_wrapper_n_ajoute_pas_un_argument_train_au_profileur(self, _stat):
         cmd = 'python -m frlm.eval_reason_bootstrap_v45 --stage sft --run tiny'
         self.assertEqual(with_gpu_peak(cmd, 989), cmd)
         self.assertTrue(with_gpu_peak('python run.py sft', 989).endswith('--gpu-peak-tflops 989'))
