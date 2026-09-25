@@ -36,7 +36,7 @@ from frlm import data as D
 from frlm import config_from_dict, model_from_cfg
 from frlm.model import PRESETS, ModelConfig, build_model
 from frlm.model_v3 import PRESETS_V3, ModelConfigV3
-from frlm.model_v5 import PRESETS_V5, ModelConfigV5
+from frlm.model_v5 import PRESETS_V5
 from frlm.optim import build_optimizers, lr_multiplier
 
 ROOT = Path(__file__).resolve().parent
@@ -423,8 +423,8 @@ class Trainer:
         # le nom du preset choisit l'architecture : "v3-*" -> model_v3 (speedrun)
         if cfg.preset in PRESETS_V5:
             if cfg.seq_len > 2048 or cfg.hybrid:
-                raise ValueError("v5 Qwen4-exp : contexte <= 2048, sans option --hybrid v2")
-            mcfg = ModelConfigV5(**PRESETS_V5[cfg.preset])
+                raise ValueError("v5 : contexte <= 2048, sans option --hybrid v2")
+            mcfg = config_from_dict(PRESETS_V5[cfg.preset])
         elif cfg.preset in PRESETS_V3:
             mcfg = ModelConfigV3(**PRESETS_V3[cfg.preset])
         else:
@@ -1274,7 +1274,7 @@ def add_train_args(p):
     p.add_argument("--mid-curriculum", default="",
                    help="pour la phase mid : v4.3 active les bins curriculum 80/20")
     p.add_argument("--sft-recipe", default="",
-                   help="SFT : v5 Qwen4-exp, v4.4/v4.5, reason45/reason45b historiques ou reason45c corrigé")
+                   help="SFT : v5, v4.4/v4.5, reason45/reason45b historiques ou reason45c corrigé")
     p.add_argument("--no-compile", dest="compile", action="store_false",
                    help="désactive torch.compile (actif par défaut : +94%% de débit ; "
                         "retombe tout seul en mode non compilé si triton manque)")

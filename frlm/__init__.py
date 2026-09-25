@@ -23,6 +23,9 @@ def config_from_dict(d: dict):
     if d.get("arch") == "v5-qwen4exp":
         from frlm.model_v5 import ModelConfigV5
         return ModelConfigV5.from_dict(d)
+    if d.get("arch") == "v5-dense":
+        from frlm.model_v5 import ModelConfigV5Dense
+        return ModelConfigV5Dense.from_dict(d)
     if d.get("arch") == "v3":
         from frlm.model_v3 import ModelConfigV3
         return ModelConfigV3.from_dict(d)
@@ -35,6 +38,9 @@ def model_from_cfg(mcfg):
     if mcfg.to_dict().get("arch") == "v5-qwen4exp":
         from frlm.model_v5 import Qwen4ExpLM
         return Qwen4ExpLM(mcfg)
+    if mcfg.to_dict().get("arch") == "v5-dense":
+        from frlm.model_v5 import DenseLM
+        return DenseLM(mcfg)
     from frlm.model_v3 import ModelConfigV3, build_model_v3
     if isinstance(mcfg, ModelConfigV3):
         return build_model_v3(mcfg)

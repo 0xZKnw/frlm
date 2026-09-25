@@ -1,7 +1,6 @@
-"""Qwen4-exp réduit à 350M : implémentation Transformers épinglée, poids neufs.
+"""V5 Qwen4-exp dense et lecture des anciens checkpoints Qwen4-exp MoE.
 
-Le contexte reste borné à 2048 : le budget QSA couvre toute la fenêtre. Aucun
-gain de sparsité ni entraînement de l'indexeur long contexte n'est revendiqué.
+Implémentations Transformers épinglées, poids neufs, contexte borné à 2048.
 """
 from __future__ import annotations
 
@@ -15,7 +14,10 @@ from torch.nn import functional as F
 from frlm.model import QwenLikeLM
 
 
-PRESETS_V5 = {"v5-qwen4exp-350m": {}}
+PRESETS_V5 = {
+    "v5-dense-350m": {"arch": "v5-dense"},
+    "v5-qwen4exp-350m": {"arch": "v5-qwen4exp"},
+}
 
 
 def full_context_indexer(self, hidden_states, position_embeddings, attention_mask, past_key_values):
@@ -119,13 +121,58 @@ class ModelConfigV5:
         )
 
 
-class Qwen4ExpLM(QwenLikeLM):
-    def __init__(self, cfg: ModelConfigV5):
-        from transformers import Qwen4ExpForCausalLM
+@dataclass
+class ModelConfigV5Dense(ModelConfigV5):
+    d_model: int = 768
+    n_layer: int = 24
+    n_head: int = 12
+    n_kv_head: int = 3
+    d_ff: int = 3840
+    linear_heads: int = 12
+    linear_key_heads: int = 6
+    num_experts: int = 0
+    experts_per_token: int = 0
+    router_aux_loss_coef: float = 0.0
 
-        nn.Module.__init__(self)
-        self.cfg = cfg
-        self.hf = Qwen4ExpForCausalLM(cfg.hf_config())
+    def to_dict(self):
+        return {"arch": "v5-dense", **asdict(self)}
+
+    def validate(self):
+        dimensions = (self.vocab_size, self.d_model, self.n_layer, self.n_head,
+                      self.n_kv_head, self.head_dim, self.d_ff, self.linear_heads,
+                      self.linear_key_heads, self.ngram_vocab)
+        if any(v <= 0 for v in dimensions):
+            raise ValueError("dimensions v5 dense strictement positives")
+        if not 1 <= self.max_seq_len <= 2048 or self.n_layer < 4:
+            raise ValueError("v5 dense : au moins 4 couches, contexte entre 1 et 2048")
+        if self.d_model != self.n_head * self.head_dim or self.n_head % self.n_kv_head:
+            raise ValueError("v5 dense : dimensions des têtes GQA incompatibles")
+        if self.head_dim % 4 or self.d_model % 8:
+            raise ValueError("v5 dense : head_dim divisible par 4, d_model par 8")
+        if self.linear_heads % self.linear_key_heads:
+            raise ValueError("v5 dense : têtes Gated DeltaNet incompatibles")
+        if self.num_experts != 0 or self.experts_per_token != 0 or self.router_aux_loss_coef != 0:
+            raise ValueError("v5 dense : aucun expert ni routeur")
+
+    def hf_config(self):
+        from frlm.qwen4_dense import Qwen4ExpDenseConfig
+
+        self.validate()
+        # Réutiliser exactement les réglages GDN/GR4/PLE/QSA du Qwen4-exp existant.
+        common = ModelConfigV5(**(asdict(self) | {"num_experts": 1, "experts_per_token": 1}))
+        return Qwen4ExpDenseConfig.from_dict(common.hf_config().to_dict() | {
+            "model_type": Qwen4ExpDenseConfig.model_type, "intermediate_size": self.d_ff,
+            "num_experts": 0, "num_experts_per_tok": 0,
+            "moe_intermediate_size": 1, "shared_expert_intermediate_size": 1,
+            "router_aux_loss_coef": 0.0, "output_router_logits": False,
+        })
+
+
+class TransformersLM(QwenLikeLM):
+    """Interface frlm commune : cibles déjà décalées, masques SFT et cache HF."""
+    has_router = False
+
+    def _configure_qwen4(self):
         for module in self.hf.modules():
             if type(module).__name__ == "Qwen4ExpTextRMSNorm":
                 module.zero_centered = True
@@ -140,23 +187,14 @@ class Qwen4ExpLM(QwenLikeLM):
                 total -= self.hf.lm_head.weight.numel()
         return total
 
-    def flops_per_token(self):
-        # Estimation matricielle seulement ; les scans/routages ne sont pas un MFU exact.
-        inactive = sum(p.numel() for n, p in self.named_parameters() if ".experts." in n)
-        inactive *= 1 - self.cfg.experts_per_token / self.cfg.num_experts
-        output = self.hf.lm_head.weight.numel()
-        return 6 * (self.num_params(non_embedding=True) - inactive + output)
-
-    def describe(self):
-        return "Qwen4-exp · GDN 3:1 · MoE 2/8 + partagé · GR4 · PLE"
-
     def forward(self, idx, targets=None, loss_mask=None, z_loss=0.,
                 diagnostics=True, loss_reduction="mean"):
         if idx.shape[1] > self.cfg.max_seq_len:
             raise ValueError("séquence supérieure au contexte v5")
         if loss_reduction not in ("mean", "sum"):
             raise ValueError("loss_reduction doit être mean ou sum")
-        out = self.hf(idx, use_cache=False, output_router_logits=targets is not None)
+        router_args = {"output_router_logits": targets is not None} if self.has_router else {}
+        out = self.hf(idx, use_cache=False, **router_args)
         logits = out.logits
         if targets is None:
             return logits, None, {}
@@ -171,7 +209,7 @@ class Qwen4ExpLM(QwenLikeLM):
             losses = losses + z_loss * logits.float().logsumexp(-1).square() * valid
         count = valid.sum()
         loss = losses.sum()
-        if self.training and out.aux_loss is not None:
+        if self.has_router and self.training and out.aux_loss is not None:
             loss = loss + self.cfg.router_aux_loss_coef * out.aux_loss * count
         if loss_reduction == "mean":
             loss = loss / count.clamp_min(1)
@@ -182,5 +220,45 @@ class Qwen4ExpLM(QwenLikeLM):
         return DynamicCache(config=self.hf.config)
 
     def _forward_cached(self, idx, caches, pos):
+        router_args = {"output_router_logits": False} if self.has_router else {}
         return self.hf(idx, past_key_values=caches, use_cache=True,
-                       logits_to_keep=1, output_router_logits=False).logits
+                       logits_to_keep=1, **router_args).logits
+
+
+class DenseLM(TransformersLM):
+    def __init__(self, cfg: ModelConfigV5Dense):
+        from frlm.qwen4_dense import Qwen4ExpDenseForCausalLM
+
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.hf = Qwen4ExpDenseForCausalLM(cfg.hf_config())
+        self._configure_qwen4()
+
+    def flops_per_token(self):
+        # Estimation matricielle uniquement, hors scans GDN et produits QK/AV.
+        return 6 * (self.num_params(non_embedding=True) + self.hf.lm_head.weight.numel())
+
+    def describe(self):
+        return "Qwen4-exp dense · GDN 3:1 · SwiGLU · GR4 · PLE"
+
+
+class Qwen4ExpLM(TransformersLM):
+    has_router = True
+
+    def __init__(self, cfg: ModelConfigV5):
+        from transformers import Qwen4ExpForCausalLM
+
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.hf = Qwen4ExpForCausalLM(cfg.hf_config())
+        self._configure_qwen4()
+
+    def flops_per_token(self):
+        # Estimation matricielle seulement ; les scans/routages ne sont pas un MFU exact.
+        inactive = sum(p.numel() for n, p in self.named_parameters() if ".experts." in n)
+        inactive *= 1 - self.cfg.experts_per_token / self.cfg.num_experts
+        output = self.hf.lm_head.weight.numel()
+        return 6 * (self.num_params(non_embedding=True) - inactive + output)
+
+    def describe(self):
+        return "Qwen4-exp · GDN 3:1 · MoE 2/8 + partagé · GR4 · PLE"

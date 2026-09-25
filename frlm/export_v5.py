@@ -1,7 +1,8 @@
-"""Export HF/GGUF de la v5 ; réutilise le convertisseur officiel llama.cpp.
+"""Export HF de la v5 ; GGUF réservé au MoE historique.
 
 Les seules adaptations sont le BPE français reconnu par sa structure, le nom
 canonique des couches QSA et la table PLE non fragmentée de Transformers 5.17.
+La variante Qwen4-exp dense s'exporte avec --hf-only et son code HF local.
 """
 from __future__ import annotations
 
@@ -26,8 +27,8 @@ def export_hf(checkpoint: Path, tokenizer: Path, output: Path):
         raise FileExistsError(f"export déjà présent : {output}")
     ck = torch.load(checkpoint, map_location="cpu", weights_only=False, mmap=True)
     cfg = config_from_dict(ck["model_cfg"])
-    if cfg.to_dict().get("arch") != "v5-qwen4exp":
-        raise ValueError("checkpoint autre que Qwen4-exp v5")
+    if cfg.to_dict().get("arch") not in ("v5-qwen4exp", "v5-dense"):
+        raise ValueError("checkpoint autre que v5")
     from frlm.prepare_v5 import sha256
     if ck.get("tokenizer_sha256") != sha256(tokenizer):
         raise ValueError("empreinte du tokenizer différente du checkpoint")
@@ -52,6 +53,8 @@ def export_hf(checkpoint: Path, tokenizer: Path, output: Path):
 def normalize_config(folder: Path):
     path = folder / "config.json"
     cfg = json.loads(path.read_text())
+    if cfg["model_type"] == "frlm_qwen4exp_dense":
+        return  # Export HF natif : ne pas appliquer les adaptations GGUF historiques.
     cfg["layer_types"] = ["full_attention" if t == "qwen_sparse_attention" else t
                           for t in cfg["layer_types"]]
     path.write_text(json.dumps(cfg, indent=2) + "\n")
@@ -62,6 +65,9 @@ def convert(folder: Path, output: Path, llama_cpp: Path, outtype="f32"):
 
     if output.exists():
         raise FileExistsError(f"GGUF déjà présent : {output}")
+    cfg = json.loads((folder / "config.json").read_text())
+    if cfg["model_type"] == "frlm_qwen4exp_dense":
+        raise ValueError("GGUF Qwen4-exp dense non pris en charge ; utiliser --hf-only")
     revision = subprocess.check_output(["git", "-C", str(llama_cpp), "rev-parse", "HEAD"], text=True).strip()
     if revision != LLAMA_REVISION:
         raise ValueError(f"llama.cpp attendu : {LLAMA_REVISION}, reçu : {revision}")
@@ -107,10 +113,18 @@ def main():
     p.add_argument("--checkpoint", type=Path)
     p.add_argument("--tokenizer", type=Path, default=Path("data-v5/tokenizer.json"))
     p.add_argument("--hf-dir", type=Path, required=True)
-    p.add_argument("--llama-cpp", type=Path, required=True)
-    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--hf-only", action="store_true", help="export HF uniquement (variante dense)")
+    p.add_argument("--llama-cpp", type=Path)
+    p.add_argument("--output", type=Path)
     p.add_argument("--outtype", choices=["f32", "f16", "bf16", "q8_0"], default="f16")
     args = p.parse_args()
+    if args.hf_only:
+        if not args.checkpoint:
+            p.error("--hf-only exige --checkpoint")
+        export_hf(args.checkpoint, args.tokenizer, args.hf_dir)
+        return
+    if args.llama_cpp is None or args.output is None:
+        p.error("GGUF exige --llama-cpp et --output ; utiliser --hf-only pour le dense")
     if args.checkpoint:
         export_hf(args.checkpoint, args.tokenizer, args.hf_dir)
     convert(args.hf_dir, args.output, args.llama_cpp, args.outtype)

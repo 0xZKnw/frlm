@@ -19,14 +19,15 @@ import torch
 
 from frlm.model import PRESETS, ModelConfig, build_model
 from frlm.model_v3 import PRESETS_V3, ModelConfigV3, build_model_v3
-from frlm.model_v5 import PRESETS_V5, ModelConfigV5, Qwen4ExpLM
+from frlm.model_v5 import PRESETS_V5
+from frlm import config_from_dict, model_from_cfg
 from frlm.optim import build_optimizers
 
 
 def construire(preset: str, seq_len: int, vocab: int):
     if preset in PRESETS_V5:
-        cfg = ModelConfigV5(vocab_size=vocab, max_seq_len=seq_len)
-        return Qwen4ExpLM(cfg), cfg
+        cfg = config_from_dict(PRESETS_V5[preset] | {"vocab_size": vocab, "max_seq_len": seq_len})
+        return model_from_cfg(cfg), cfg
     if preset in PRESETS_V3:
         cfg = ModelConfigV3(**PRESETS_V3[preset])
         cfg.vocab_size = vocab

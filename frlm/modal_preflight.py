@@ -247,7 +247,8 @@ def _check_command(cmd: str, root: Path = Path("/root/app")) -> None:
         audit(required[0].parent, recipe="reason45c")
         if "--baselines-only" not in parts:
             _check_rl_files(parts, stage, [required[1], required[2]])
-    is_v5 = _arg(parts, "--preset", "") == "v5-qwen4exp-350m"
+    from frlm.model_v5 import PRESETS_V5
+    is_v5 = _arg(parts, "--preset", "") in PRESETS_V5
     if is_v5 and stage in ("train", "sft"):
         from frlm.prepare_v5 import audit as audit_v5, sha256
         data_dir = required[0].parent
@@ -265,13 +266,14 @@ def _check_command(cmd: str, root: Path = Path("/root/app")) -> None:
             payload = torch.load(path, map_location="cpu", mmap=True, weights_only=False)
             import argparse
             from run import add_train_args, cfg_from_args
-            from frlm.model_v5 import ModelConfigV5, PRESETS_V5, validate_resume
+            from frlm import config_from_dict
+            from frlm.model_v5 import validate_resume
             from frlm.data import load_tokenizer
             parser = argparse.ArgumentParser()
             add_train_args(parser)
             args = parser.parse_args(parts[parts.index(stage) + 1:])
             cfg = cfg_from_args(args, "pretrain" if stage == "train" else stage)
-            mcfg = ModelConfigV5(**PRESETS_V5[cfg.preset])
+            mcfg = config_from_dict(PRESETS_V5[cfg.preset])
             mcfg.vocab_size = load_tokenizer(data_dir / "tokenizer.json").get_vocab_size()
             mcfg.max_seq_len = max(mcfg.max_seq_len, cfg.seq_len)
             validate_resume(payload, cfg, mcfg.to_dict(), sha256(data_dir / "manifest.json"),

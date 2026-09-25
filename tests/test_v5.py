@@ -31,7 +31,10 @@ class DataV5Tests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 command(*args)
         first = command("pretrain", 3000, 21600)
-        second = command("pretrain", 3000, 18000, "runs/fr-v5-qwen4exp/pretrain/ckpt_latest.pt")
+        second = command("pretrain", 3000, 18000, "runs/fr-v5-dense/pretrain/ckpt_latest.pt")
+        self.assertEqual(first[first.index("--preset") + 1], "v5-dense-350m")
+        self.assertEqual(first[first.index("--run") + 1], "fr-v5-dense")
+        self.assertIn("v5-dense-350m", command("pilot", 0, 900))
         self.assertEqual(first[first.index("--max-steps") + 1], second[second.index("--max-steps") + 1])
         self.assertNotIn("--init-weights-only", second)
         import modal_v5
@@ -133,6 +136,7 @@ class ModelV5Tests(unittest.TestCase):
                                 n_kv_head=1, head_dim=8, d_ff=16, linear_heads=2,
                                 linear_key_heads=1, ngram_vocab=31, num_experts=2,
                                 experts_per_token=1, max_seq_len=32)
+        self.preset = "v5-qwen4exp-350m"
         self.model = model_from_cfg(config_from_dict(self.cfg.to_dict()))
         self.x = torch.randint(5, 300, (1, 12))
 
@@ -268,7 +272,6 @@ class ModelV5Tests(unittest.TestCase):
 
     def test_trainer_handoff_preserves_global_schedule(self):
         import contextlib
-        from dataclasses import asdict
         import io
         import numpy as np
         from tokenizers import Tokenizer, models, trainers, pre_tokenizers
@@ -287,13 +290,13 @@ class ModelV5Tests(unittest.TestCase):
                          for p in root.iterdir()}
             write_json(root / "manifest.json", {"artifacts": artifacts})
             write_json(root / "meta.json", {"manifest_sha256": sha256(root / "manifest.json")})
-            preset = asdict(self.cfg)
+            preset = self.cfg.to_dict()
             preset["max_seq_len"] = 128
-            cfg = dict(data_dir=str(root), out_dir=str(root / "runs"), preset="v5-qwen4exp-350m",
+            cfg = dict(data_dir=str(root), out_dir=str(root / "runs"), preset=self.preset,
                        batch_size=1, grad_accum=1, seq_len=12, max_steps=3, warmup=2,
                        dtype="float32", device="cpu", compile=False, sample_every=0,
                        eval_every=2, eval_iters=1, optimizer="adamw", lr=1e-4)
-            with patch.dict("run.PRESETS_V5", {"v5-qwen4exp-350m": preset}):
+            with patch.dict("run.PRESETS_V5", {self.preset: preset}):
                 uninterrupted = Trainer(TrainConfig(run_name="whole", **cfg))
                 uninterrupted.train()
                 interrupted = Trainer(TrainConfig(run_name="split", stop_after_seconds=1e-9, **cfg))
@@ -312,7 +315,7 @@ class ModelV5Tests(unittest.TestCase):
                 import shlex
                 from frlm.modal_preflight import _check_command
                 from frlm.model_v5 import validate_resume
-                cli = ["python", "run.py", "train", "--preset", "v5-qwen4exp-350m",
+                cli = ["python", "run.py", "train", "--preset", self.preset,
                        "--data-dir", str(root), "--seq-len", "12", "--batch-size", "1",
                        "--grad-accum", "1", "--max-steps", "3", "--warmup", "2",
                        "--dtype", "float32", "--optimizer", "adamw", "--lr", "0.0001",
@@ -359,6 +362,134 @@ class ModelV5Tests(unittest.TestCase):
                 self.assertEqual(GenerationConfig.from_pretrained(exported).eos_token_id, [0, 2])
                 with self.assertRaises(FileExistsError):
                     export_hf(checkpoint, root / "tokenizer.json", exported)
+                if self.preset == "v5-dense-350m":
+                    from transformers import AutoModelForCausalLM
+                    hf = AutoModelForCausalLM.from_pretrained(
+                        exported, local_files_only=True, trust_remote_code=True).eval()
+                    reference = model_from_cfg(config_from_dict(payload["model_cfg"])).eval()
+                    reference.load_state_dict(payload["model"])
+                    probe = self.x % reference.cfg.vocab_size
+                    torch.testing.assert_close(hf(probe).logits, reference(probe)[0])
+                    # Un ancien MoE doit être refusé avant l'allocation GPU et au chargement.
+                    from frlm.model_v5 import ModelConfigV5
+                    wrong = root / "old-moe.pt"
+                    torch.save(payload | {"model_cfg": ModelConfigV5().to_dict()}, wrong)
+                    cli[cli.index("--max-steps") + 1] = "3"
+                    cli[cli.index("--resume") + 1] = str(wrong)
+                    with self.assertRaisesRegex(ValueError, "configuration v5 différente"):
+                        _check_command(shlex.join(cli), root)
+                    with self.assertRaisesRegex(ValueError, "configuration v5 différente"):
+                        Trainer(TrainConfig(run_name="split", **cfg), resume=str(wrong))
+
+
+@unittest.skipUnless(Qwen4ExpForCausalLM, "installer requirements-v5.txt")
+class DenseV5Tests(unittest.TestCase):
+    def setUp(self):
+        from frlm.model_v5 import ModelConfigV5Dense
+        torch.set_num_threads(1)
+        torch.manual_seed(5501)
+        self.cfg = ModelConfigV5Dense(vocab_size=300, d_model=32, n_layer=4, n_head=4,
+                                     n_kv_head=2, head_dim=8, d_ff=64, max_seq_len=32,
+                                     linear_heads=4, linear_key_heads=2, ngram_vocab=31)
+        self.preset = "v5-dense-350m"
+        self.model = model_from_cfg(config_from_dict(self.cfg.to_dict()))
+        self.x = torch.randint(5, 300, (1, 12))
+
+    # Même contrat utilisateur pour le dense et les checkpoints MoE historiques.
+    test_causality_cache_and_roundtrip = ModelV5Tests.test_causality_cache_and_roundtrip
+    test_trainer_handoff_preserves_global_schedule = ModelV5Tests.test_trainer_handoff_preserves_global_schedule
+    test_full_context_qsa_matches_reference_and_skips_token_loop = ModelV5Tests.test_full_context_qsa_matches_reference_and_skips_token_loop
+
+    def test_hf_config_and_export_guard(self):
+        from huggingface_hub.errors import StrictDataclassClassValidationError
+        from frlm.qwen4_dense import Qwen4ExpDenseConfig
+        from frlm.export_v5 import convert, main
+        cfg = self.cfg.hf_config().to_dict()
+        for changed in ({"num_experts": 1}, {"num_experts_per_tok": 1},
+                        {"output_router_logits": True}, {"router_aux_loss_coef": 0.01},
+                        {"intermediate_size": 0}, {"hc_count": 1},
+                        {"indexer_kv_heads": 2}, {"ple_layer_ids": [4]}):
+            with self.subTest(changed=changed), self.assertRaises(StrictDataclassClassValidationError):
+                Qwen4ExpDenseConfig.from_dict(cfg | changed)
+        self.assertEqual(Qwen4ExpDenseConfig.from_dict(cfg).num_experts, 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config.json").write_text(json.dumps(cfg))
+            with self.assertRaisesRegex(ValueError, "GGUF Qwen4-exp dense non pris en charge"):
+                convert(root, root / "out.gguf", root / "llama")
+            self.assertFalse((root / "out.gguf").exists())
+        with patch("sys.argv", ["export", "--hf-only", "--checkpoint", "ckpt.pt",
+                                "--hf-dir", "exported"]), \
+                patch("frlm.export_v5.export_hf") as export, patch("frlm.export_v5.convert") as gguf:
+            main()
+            export.assert_called_once_with(Path("ckpt.pt"), Path("data-v5/tokenizer.json"), Path("exported"))
+            gguf.assert_not_called()
+
+    def test_dense_budget_routing_and_invalid_dimensions(self):
+        from frlm.bench_speed import construire
+        from frlm.model_v5 import ModelConfigV5Dense
+        from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextMLP
+        with torch.device("meta"):
+            full, cfg = construire(self.preset, 1024, 32768)
+        self.assertEqual(full.num_params(), 351_046_320)
+        self.assertEqual(cfg.to_dict()["arch"], "v5-dense")
+        self.assertEqual(full.hf.config.model_type, "frlm_qwen4exp_dense")
+        self.assertEqual(full.hf.config.num_experts, 0)
+        self.assertEqual(full.hf.config.hc_count, 4)
+        self.assertEqual(full.hf.config.ple_layer_ids, [2])
+        self.assertFalse(full.has_router)
+        self.assertTrue(all(type(layer.mlp) is Qwen4ExpTextMLP for layer in full.hf.model.layers))
+        self.assertFalse(any("expert" in name or "router" in name for name, _ in full.named_parameters()))
+        self.assertIs(full.hf.lm_head.weight, full.hf.model.embed_tokens.weight)
+        self.assertEqual(full.hf.config.layer_types,
+                         (["linear_attention"] * 3 + ["qwen_sparse_attention"]) * 6)
+        for changes in ({"max_seq_len": 0}, {"max_seq_len": 2049}, {"n_layer": 0},
+                        {"n_kv_head": 0}, {"n_kv_head": 5}, {"head_dim": 63},
+                        {"d_model": 1000}, {"d_ff": -1},
+                        {"d_model": 48, "n_head": 16, "head_dim": 3},
+                        {"linear_heads": 7}, {"linear_key_heads": 0},
+                        {"num_experts": 1}, {"experts_per_token": 1}, {"router_aux_loss_coef": 0.01}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                ModelConfigV5Dense(**changes).hf_config()
+
+    def test_dense_masked_loss_gradients_optimizer_and_generation(self):
+        from frlm.optim import build_optimizers
+        from run import TrainConfig
+        targets = self.x.roll(-1, 1)
+        targets[:, 0] = -100
+        mask = torch.zeros_like(targets)
+        mask[:, :9] = 1
+        logits, loss, _ = self.model(self.x, targets, mask, z_loss=0.01)
+        valid = mask.bool() & targets.ne(-100)
+        expected = torch.nn.functional.cross_entropy(logits[valid].float(), targets[valid])
+        expected += 0.01 * logits[valid].float().logsumexp(-1).square().mean()
+        torch.testing.assert_close(loss, expected)
+        summed = self.model(self.x, targets, mask, z_loss=0.01, loss_reduction="sum")[1]
+        torch.testing.assert_close(summed, loss * valid.sum())
+        opts, _ = build_optimizers(self.model, TrainConfig(optimizer="muon"))
+        before = self.model.hf.model.layers[0].mlp.up_proj.weight.detach().clone()
+        loss.backward()
+        self.assertTrue(all(p.grad is not None and torch.isfinite(p.grad).all()
+                            for layer in self.model.hf.model.layers for p in layer.mlp.parameters()))
+        self.assertTrue(all(torch.isfinite(p.grad).all() for p in self.model.parameters()
+                            if p.grad is not None))
+        for opt in opts:
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+        self.assertFalse(torch.equal(before, self.model.hf.model.layers[0].mlp.up_proj.weight))
+        empty = self.model(self.x, targets, torch.zeros_like(mask), z_loss=0.01)[1]
+        self.assertEqual(empty.item(), 0)
+        empty.backward()
+        self.assertTrue(all(torch.count_nonzero(p.grad) == 0 for p in self.model.parameters()
+                            if p.grad is not None))
+        with self.assertRaises(ValueError):
+            self.model(self.x, targets, loss_reduction="invalid")
+        with self.assertRaises(ValueError):
+            self.model(torch.zeros(1, 33, dtype=torch.long))
+        self.model.eval()
+        generated = self.model.generate(self.x, max_new_tokens=3, temperature=0, stop_ids=())
+        self.assertEqual(generated.shape, (1, 15))
+        torch.testing.assert_close(generated[:, :12], self.x)
 
 
 if __name__ == "__main__":

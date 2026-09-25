@@ -1,4 +1,4 @@
-"""Modal v5 uniquement. Par défaut : préflight CPU. --go lance le mode demandé.
+"""Modal v5 dense uniquement. Par défaut : préflight CPU. --go lance le mode demandé.
 
 Les données sont préparées localement ; aucun téléchargement de corpus sur GPU.
 Les profils Modal séparent les comptes ; le second reçoit le checkpoint complet.
@@ -18,7 +18,7 @@ image = (modal.Image.from_registry("nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04",
          .pip_install("packaging", "ninja", "flash-linear-attention==0.5.2")
          .pip_install("wheel==0.45.1")
          .run_commands("python -m pip install --no-build-isolation causal-conv1d==1.7.0")
-         # FLA refuse le backward GDN Triton 3.5 sur H100 (bug amont #640).
+         # Gated DeltaNet est conservé : backward TileLang sur H100 (bug Triton #640).
          .pip_install("tilelang==0.1.14")
          .env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/root/app",
                "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
@@ -34,7 +34,7 @@ def command(mode: str, steps: int, seconds: float, resume: str = "") -> list[str
     if mode == "pilot":
         if seconds > 900:
             raise ValueError("pilote limité à 15 minutes")
-        return ["python", "-m", "frlm.bench_speed", "--presets", "v5-qwen4exp-350m",
+        return ["python", "-m", "frlm.bench_speed", "--presets", "v5-dense-350m",
                 "--vocab-size", "32768", "--seq-len", "1024", "--batch-size", "8",
                 "--grad-accum", "8", "--warmup", "3", "--steps", "10", "--no-compile",
                 "--gpu-peak-tflops", "989"]
@@ -43,8 +43,8 @@ def command(mode: str, steps: int, seconds: float, resume: str = "") -> list[str
     if mode == "sft" and not resume:
         raise ValueError("le SFT exige un checkpoint prétrain explicite")
     args = ["python", "run.py", "train" if mode == "pretrain" else "sft",
-            "--preset", "v5-qwen4exp-350m", "--data-dir", "data-v5",
-            "--run", "fr-v5-qwen4exp", "--seq-len", "1024",
+            "--preset", "v5-dense-350m", "--data-dir", "data-v5",
+            "--run", "fr-v5-dense", "--seq-len", "1024",
             "--batch-size", "8", "--grad-accum", "8", "--max-steps", str(steps),
             "--stop-after-seconds", str(seconds), "--seed", "551337",
             "--optimizer", "muon" if mode == "pretrain" else "adamw",
@@ -83,7 +83,6 @@ def preflight(args: list[str]):
               volumes={"/vol": volume}, timeout=22200)
 def execute(args: list[str], seconds: float):
     import threading
-    # Refuser le repli PyTorch lent avant de mesurer ou d'entraîner.
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule  # noqa: F401
     from causal_conv1d import causal_conv1d_fn  # noqa: F401
     mount()

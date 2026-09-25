@@ -496,12 +496,20 @@ Puis, selon la zone touchée :
   réellement exécutées et les validations GPU/cloud non exécutées.
 
 
-## V5 Qwen4-exp (préparation du 24 septembre 2026)
+## V5 Qwen4-exp dense (25 septembre 2026) et ancien MoE
 
-- La v5 utilise `arch=v5-qwen4exp`, `ModelConfigV5`, `Qwen4ExpLM` et le preset
-  `v5-qwen4exp-350m` (350 011 504 paramètres). Dépendances séparées dans
-  `requirements-v5.txt`. Réutiliser Transformers 5.17.0 ; ne pas recopier son modèle.
-- Le fast path QSA retourne le masque visible entier uniquement si le nombre de
+- La v5 courante utilise `arch=v5-dense`, `ModelConfigV5Dense`, `DenseLM` et le
+  preset `v5-dense-350m` (351 046 320 paramètres) : Qwen4-exp dense, 24 couches,
+  largeur 768, FFN 3840, GQA 12Q/3KV, tête 64, vocabulaire 32768, contexte 2048,
+  embeddings partagés. Aucun expert ni routeur. Nouveau run `fr-v5-dense`.
+  `frlm/qwen4_dense.py` réutilise Transformers 5.17.0 : GDN/attention 3:1,
+  GR4, PLE, QSA et cache inchangés, un seul SwiGLU par couche. Conserver
+  `num_experts=0` dans la configuration dense et tester l'absence réelle de
+  routeurs/experts. Ce modèle est une variante locale, pas un dense officiel Qwen.
+- `arch=v5-qwen4exp`, `ModelConfigV5`, `Qwen4ExpLM` et le preset MoE historique
+  `v5-qwen4exp-350m` restent lisibles. Ne pas réécrire leurs checkpoints/rapports.
+  Une reprise MoE vers dense doit échouer au préflight et dans Trainer.
+- Le fast path QSA partagé retourne le masque visible entier uniquement si le nombre de
   clés est inférieur ou égal au budget. Conserver les mises à jour du cache
   indexeur et le repli amont au-delà du budget. Tester sorties, gradients,
   masques et franchissement du budget lors de toute modification.
@@ -518,22 +526,29 @@ Puis, selon la zone touchée :
 - `modal_v5.py` exige `--go` après le préflight CPU pour allouer un H100. L'accord
   explicite de l'utilisateur reste nécessaire ; aucun lancement n'est autorisé
   pendant la préparation. Ne pas relancer le 229M.
-- Image Modal : `wheel==0.45.1` pour construire causal-conv1d, `PYTHONPATH=/root/app`,
-  `tilelang==0.1.14` pour contourner le bug Triton/Hopper #640 sans retirer sa garde.
+- Image Modal dense : PyTorch/Transformers, `PYTHONPATH=/root/app`, FLA,
+  causal-conv1d et TileLang 0.1.14 pour GDN (contournement du bug Triton/Hopper
+  #640, garde amont conservée). Les modes pilote/prétrain/SFT ciblent le dense.
   Limites du job : 4 cœurs et 32 GiB maximum. Utiliser `modal run --detach` pour
   une session nocturne ; le timer reste indépendant du schedule global.
+  Aucun débit GPU dense n'est mesuré : refaire un pilote autorisé avant de fixer
+  le nombre global de steps. Les mesures du MoE ne sont pas transférables.
 - Pour les deux comptes, conserver le même `--max-steps` global, les mêmes bins,
   tokenizer et réglages. Transférer le checkpoint complet avec optimiseurs/RNG.
   Utiliser `--stop-after-seconds` pour la limite de session ; pas de reprise
   weights-only dans la même phase. Le préflight et Trainer partagent ce contrat.
-- GGUF : `python -m bench.verify_v5_gguf --llama-cpp /chemin/llama.cpp
-  --tokenizer data-v5/tokenizer.json --full-size`. Révision llama.cpp épinglée
-  dans `frlm/export_v5.py`. Référence numérique avec cache F32 et Flash Attention
-  désactivée : le routage MoE peut amplifier des arrondis du cache F16.
-  La réussite d'un chargement Q4 n'est pas une preuve de qualité quantifiée.
+- Export dense : `python -m frlm.export_v5 --checkpoint CHEMIN --tokenizer
+  data-v5/tokenizer.json --hf-dir exports/v5-dense-hf --hf-only`. Le code HF
+  de la variante accompagne les safetensors. Recharger avec `trust_remote_code=True`
+  et vérifier les logits. Le GGUF dense est explicitement hors périmètre et refusé.
+  `bench.verify_v5_gguf` et ses rapports restent réservés au MoE historique.
 - Vérification : `python -m unittest discover -s tests -v`, puis `python -c
   'import atexit, verification.v5_contracts; from crosshair.main import main; from
   crosshair.auditwall import disable_auditwall; atexit.register(disable_auditwall);
   main()' check verification/v5_contracts.py --analysis_kind=asserts
-  --per_condition_timeout=15 --report_all`. Le job CI v5 vérifie aussi une petite
-  conversion HF/GGUF sur CPU. Aucun test GPU/Modal ne doit partir sans accord.
+  --per_condition_timeout=15 --report_all`. La validation des dimensions denses
+  est explorée symboliquement (largeur -2..4096, têtes -2..64, dimension de tête
+  -2..256, contexte -2..4096) ; cela ne prouve pas les calculs PyTorch/CUDA.
+  La suite CPU vérifie la reprise et l'export HF dense ; la CI garde également
+  la vérification GGUF du MoE historique.
+  Aucun test GPU/Modal ne doit partir sans accord.
