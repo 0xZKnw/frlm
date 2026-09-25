@@ -1041,6 +1041,10 @@ class Trainer:
 # ======================================================================================
 # Mode chat
 # ======================================================================================
+def chat_device(cuda_available: bool, mps_available: bool) -> str:
+    return "cuda" if cuda_available else "mps" if mps_available else "cpu"
+
+
 def cmd_chat(args):
     from rich.console import Console
 
@@ -1065,14 +1069,14 @@ def cmd_chat(args):
     if path is None:
         sys.exit(f"[!] Aucun checkpoint dans {run_dir}. Entraîne d'abord : python run.py train")
 
-    ck = torch.load(path, map_location="cpu", weights_only=False)
+    ck = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
     mcfg = config_from_dict(ck["model_cfg"])
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = model_from_cfg(mcfg).to(device)
+    device = chat_device(torch.cuda.is_available(), torch.backends.mps.is_available())
+    model = model_from_cfg(mcfg)
     model.load_state_dict(ck["model"])
+    if device != "cpu":
+        model = model.to(device=device, dtype=torch.bfloat16)
     model.eval()
-    if device == "cuda":
-        model = model.to(torch.bfloat16)
 
     tokenizer_paths = [run_dir / "tokenizer.json", Path(args.data_dir) / "tokenizer.json"]
     tokenizer_path = next((candidate for candidate in tokenizer_paths if candidate.exists()), None)
@@ -1085,7 +1089,8 @@ def cmd_chat(args):
     console.print(f"[bold green]Modèle chargé[/] : {path.name} · step {ck['step']} · "
                   f"{human(ck['tokens_seen'])} tokens vus · val loss "
                   f"{ck.get('val_loss', float('nan')):.4f} · phase {ck.get('stage','?')}")
-    console.print(f"[dim]{human(model.num_params())} params · {mcfg.n_layer}L · d={mcfg.d_model}[/]")
+    console.print(f"[dim]{human(model.num_params())} params · {mcfg.n_layer}L · d={mcfg.d_model} · {device}[/]")
+    del ck
     console.print("[dim]Commandes : /reset  /think auto|on|off  /temp 0.8  /topp 0.95  /topk 50  "
                   "/max 200  /raw <texte>  /stats  /quit[/]\n")
 

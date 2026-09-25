@@ -71,6 +71,9 @@ retrouve le même ordre avec la seed et le step sauvegardés.
 Ses modes `pretrain`/`sft` ciblent Qwen3.5 ; `pilot-v4` mesure le preset v4-base
 avec le vocabulaire v5, sans lire le corpus ni entraîner un checkpoint.
 `pretrain-v4` utilise `data-v5` et le run séparé `fr-v5-v4base-252m`.
+Sur Mac Apple Silicon, `run.py chat` utilise automatiquement le GPU MPS en bf16
+pour ce checkpoint local ; sans MPS, il reste sur CPU. Le chargement mémoire
+mappée évite de lire les états d'optimiseur du checkpoint pour discuter.
 L'image conserve FLA,
 causal-conv1d et TileLang pour Gated DeltaNet. Les ressources restent bornées
 à 4 cœurs et 32 GiB de RAM maximum. Le pilote du preset **228M** sur H100,
