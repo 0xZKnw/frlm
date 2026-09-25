@@ -62,8 +62,7 @@ def command(mode: str, steps: int, seconds: float, resume: str = "",
             "--min-lr-frac", "0.1", "--eval-every", "200", "--eval-iters", "20",
             "--sample-every", "200", "--save-every", "200", "--ckpt-every-min", "5",
             "--keep-last", "2", "--gpu-peak-tflops", "989"]
-    if mode == "sft":
-        args.append("--no-compile")
+    args.append("--no-compile")
     if resume:
         args += ["--resume", resume]
     if mode == "sft":
@@ -117,4 +116,6 @@ def main(mode: str = "pilot", steps: int = 0, seconds: float = 900,
     if not go or check_only:
         print("Préflight CPU terminé. Aucun GPU lancé ; --go est requis.")
         return
-    execute.remote(args, seconds)
+    call = execute.spawn(args, seconds)
+    print(f"Appel GPU Modal : {call.object_id}")
+    call.get()

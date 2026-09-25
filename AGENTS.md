@@ -527,20 +527,23 @@ Puis, selon la zone touchée :
   assistant ; ne pas confondre leur distribution avec celle des conversations.
   Le déficit de la source AST est explicite, jamais rempli par duplication.
 - `modal_v5.py` exige `--go` après le préflight CPU pour allouer un H100.
-  Les modes pilote/prétrain/SFT ciblent Qwen3.5 ; aucun prétrain n'a démarré.
-  Le dernier pilote 228M, sans compilation, batch 32 × accumulation 2,
+  Les modes pilote/prétrain/SFT ciblent Qwen3.5. Le pilote 228M, sans compilation,
+  batch 32 × accumulation 2,
   séquence 1024, a atteint 98,0k tokens/s et 72,86 Go de VRAM sur H100.
   Le prétrain utilise cette géométrie ; le SFT reste en 8 × 8 pour que le replay
-  de 12 % occupe un microbatch sur huit. Le prétrain active `torch.compile` sur
-  demande de l'utilisateur ; aucun débit compilé n'est mesuré. Ne plus lancer
-  de pilote payant :
-  l'utilisateur a demandé d'arrêter les tests pour préserver ses crédits.
+  de 12 % occupe un microbatch sur huit. Un essai de prétrain compilé s'est arrêté
+  sans pas ni checkpoint. Le pilote compilé a dépassé la VRAM à batch 32 ; le
+  repli à batch 16 a expiré sans débit mesuré. Le wrapper force donc
+  `--no-compile` pour prétrain et SFT. Ne plus lancer de pilote payant :
+  l'utilisateur souhaite préserver ses crédits.
+  Le préflight CPU ne compile aucun noyau CUDA ; en v4 aussi, le modèle était
+  envoyé sur GPU avant `torch.compile`, dont le travail démarre au premier step.
   Les mesures sur tokens aléatoires ne garantissent pas le débit réel.
 - Image Modal : PyTorch/Transformers, `PYTHONPATH=/root/app`, FLA,
   causal-conv1d et TileLang 0.1.14 pour GDN (contournement du bug Triton/Hopper
   #640, garde amont conservée). Limites du job : 4 cœurs et 32 GiB maximum.
-  Utiliser `modal run --detach` pour une session nocturne ; le timer reste
-  indépendant du schedule global.
+  Utiliser `modal run --detach` pour une session nocturne ; l'appel GPU passe
+  par `spawn().get()` et le timer reste indépendant du schedule global.
 - Pour les deux comptes, conserver le même `--max-steps` global, les mêmes bins,
   tokenizer et réglages. Transférer le checkpoint complet avec optimiseurs/RNG.
   Utiliser `--stop-after-seconds` pour la limite de session ; pas de reprise

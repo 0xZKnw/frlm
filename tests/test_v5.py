@@ -49,7 +49,7 @@ class DataV5Tests(unittest.TestCase):
         self.assertEqual(first[first.index("--run") + 1], "fr-v5-qwen35-230m")
         self.assertEqual(first[first.index("--batch-size") + 1], "32")
         self.assertEqual(first[first.index("--grad-accum") + 1], "2")
-        self.assertNotIn("--no-compile", first)
+        self.assertIn("--no-compile", first)
         sft = command("sft", 2800, 3600, "runs/fr-v5-qwen35-230m/pretrain/ckpt_best.pt")
         self.assertEqual(sft[sft.index("--batch-size") + 1], "8")
         self.assertEqual(sft[sft.index("--grad-accum") + 1], "8")
@@ -68,8 +68,16 @@ class DataV5Tests(unittest.TestCase):
             modal_v5.main()
             cpu.remote.assert_called_once()
             gpu.remote.assert_not_called()
+            gpu.spawn.assert_not_called()
             modal_v5.main(go=True, check_only=True)
             gpu.remote.assert_not_called()
+            gpu.spawn.assert_not_called()
+            modal_v5.main(mode="pretrain", steps=3000, go=True)
+            gpu.spawn.assert_called_once()
+            gpu.spawn.return_value.get.assert_called_once()
+            gpu.remote.assert_not_called()
+            self.assertNotIn("--no-compile", command("pilot", 0, 900,
+                                                      pilot_batch=32, pilot_compile=True))
 
     @unittest.skipUnless(importlib.util.find_spec("pyarrow"), "pyarrow v5 optionnel")
     def test_parquet_nested_messages(self):

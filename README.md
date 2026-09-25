@@ -70,19 +70,22 @@ retrouve le même ordre avec la seed et le step sauvegardés.
 `modal_v5.py` reste en préflight CPU tant que `--go` n'est pas fourni.
 Ses modes pilote/prétrain/SFT ciblent Qwen3.5. L'image conserve FLA,
 causal-conv1d et TileLang pour Gated DeltaNet. Les ressources restent bornées
-à 4 cœurs et 32 GiB de RAM maximum. Le dernier pilote du preset **228M**
-sur H100, sans compilation, à batch 32 × accumulation 2 × contexte 1024,
-a atteint **98,0k tokens/s** avec **72,86 Go de VRAM**. La commande de prétrain
-garde ces réglages et active maintenant `torch.compile` ; le SFT reste à batch
-8 × accumulation 8 pour consacrer un microbatch sur huit au replay. C'est une
-mesure courte sur tokens aléatoires : le débit
-réel et la marge mémoire en entraînement complet restent à confirmer. Les
-4,0B tokens préparés représentent 17,5 tokens par paramètre ; la cible
-indicative de 20 demanderait 4,57B tokens traités, sans garantie de tenir
-dans les 57,60 $ restants avec le SFT. Aucun prétrain Qwen3.5 n'a démarré ;
-les pilotes payants sont arrêtés. La compilation du prétrain n'a pas encore
-de débit mesuré et peut augmenter le temps de démarrage ou la mémoire utilisée.
-Pour continuer après déconnexion du client, utiliser `modal run --detach`.
+à 4 cœurs et 32 GiB de RAM maximum. Le pilote du preset **228M** sur H100,
+sans compilation, à batch 32 × accumulation 2 × contexte 1024, a atteint
+**98,0k tokens/s** avec **72,86 Go de VRAM**. Un essai de prétrain compilé
+s'est arrêté avant le premier pas et sans checkpoint. Le pilote compilé suivant
+a dépassé la VRAM à batch 32, puis sa compilation à batch 16 a atteint le délai
+limite sans fournir de débit. La commande de prétrain utilise donc `--no-compile`
+avec batch 32 × accumulation 2 ; le SFT reste à batch 8 × accumulation 8 pour
+consacrer un microbatch sur huit au replay. Le débit réel et la marge mémoire
+en entraînement complet restent à confirmer. Les 4,0B tokens préparés
+représentent 17,5 tokens par paramètre ; la cible indicative de 20 demanderait
+4,57B tokens traités, sans garantie de tenir dans le budget restant avec le SFT.
+Aucun pas de prétrain Qwen3.5 n'a été effectué ; tous les pilotes sont terminés.
+Le préflight CPU vérifie les données ; `torch.compile` produit les noyaux CUDA
+au premier passage sur GPU, comme pour la v4.
+Pour continuer après déconnexion du client, utiliser `modal run --detach` ;
+le wrapper lance l'appel GPU avec `spawn()` puis attend son résultat.
 Après le pilote, fixer un nombre global de steps identique sur les deux comptes.
 `--stop-after-seconds` arrête proprement une session sans modifier ce schedule.
 Transférer le checkpoint `.pt` complet, les mêmes bins et manifests ; ne jamais
