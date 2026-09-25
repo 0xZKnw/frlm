@@ -21,6 +21,19 @@ except ImportError:
 
 
 class DataV5Tests(unittest.TestCase):
+    def test_pretrain_batches_cover_blocks_once_and_resume(self):
+        import numpy as np
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "train.bin"
+            np.arange(41, dtype=np.uint16).tofile(path)
+            corpus = D.BinCorpus(path, 4, without_replacement=True)
+            first = [int(v) for step in range(4)
+                     for v in corpus.get_batch(step, 3, seed=19, device="cpu")[0][:, 0]]
+            self.assertEqual(set(first[:10]), set(range(0, 40, 4)))
+            self.assertEqual(len(set(first[:10])), 10)
+            self.assertEqual(len(set(first[10:])), 2)
+            self.assertEqual(first[9:12], [int(v) for v in corpus.get_batch(3, 3, seed=19, device="cpu")[0][:, 0]])
+
     @unittest.skipUnless(importlib.util.find_spec("modal"), "SDK Modal optionnel")
     def test_modal_command_budget_and_explicit_handoff(self):
         from modal_v5 import command
@@ -31,10 +44,21 @@ class DataV5Tests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 command(*args)
         first = command("pretrain", 3000, 21600)
-        second = command("pretrain", 3000, 18000, "runs/fr-v5-dense/pretrain/ckpt_latest.pt")
-        self.assertEqual(first[first.index("--preset") + 1], "v5-dense-350m")
-        self.assertEqual(first[first.index("--run") + 1], "fr-v5-dense")
-        self.assertIn("v5-dense-350m", command("pilot", 0, 900))
+        second = command("pretrain", 3000, 18000, "runs/fr-v5-qwen35-230m/pretrain/ckpt_latest.pt")
+        self.assertEqual(first[first.index("--preset") + 1], "v5-qwen35-230m")
+        self.assertEqual(first[first.index("--run") + 1], "fr-v5-qwen35-230m")
+        self.assertEqual(first[first.index("--batch-size") + 1], "32")
+        self.assertEqual(first[first.index("--grad-accum") + 1], "2")
+        sft = command("sft", 2800, 3600, "runs/fr-v5-qwen35-230m/pretrain/ckpt_best.pt")
+        self.assertEqual(sft[sft.index("--batch-size") + 1], "8")
+        self.assertEqual(sft[sft.index("--grad-accum") + 1], "8")
+        self.assertIn("v5-qwen35-230m", command("pilot", 0, 900))
+        pilot = command("pilot", 0, 900, pilot_batch=16, pilot_compile=True)
+        self.assertEqual(pilot[pilot.index("--batch-size") + 1], "16")
+        self.assertEqual(pilot[pilot.index("--grad-accum") + 1], "4")
+        self.assertNotIn("--no-compile", pilot)
+        with self.assertRaises(ValueError):
+            command("pilot", 0, 900, pilot_batch=3)
         self.assertEqual(first[first.index("--max-steps") + 1], second[second.index("--max-steps") + 1])
         self.assertNotIn("--init-weights-only", second)
         import modal_v5
@@ -298,6 +322,8 @@ class ModelV5Tests(unittest.TestCase):
                        eval_every=2, eval_iters=1, optimizer="adamw", lr=1e-4)
             with patch.dict("run.PRESETS_V5", {self.preset: preset}):
                 uninterrupted = Trainer(TrainConfig(run_name="whole", **cfg))
+                self.assertEqual(uninterrupted.train_data.without_replacement,
+                                 self.preset == "v5-qwen35-230m")
                 uninterrupted.train()
                 interrupted = Trainer(TrainConfig(run_name="split", stop_after_seconds=1e-9, **cfg))
                 interrupted.train()
@@ -362,7 +388,7 @@ class ModelV5Tests(unittest.TestCase):
                 self.assertEqual(GenerationConfig.from_pretrained(exported).eos_token_id, [0, 2])
                 with self.assertRaises(FileExistsError):
                     export_hf(checkpoint, root / "tokenizer.json", exported)
-                if self.preset == "v5-dense-350m":
+                if self.preset in ("v5-dense-350m", "v5-qwen35-230m"):
                     from transformers import AutoModelForCausalLM
                     hf = AutoModelForCausalLM.from_pretrained(
                         exported, local_files_only=True, trust_remote_code=True).eval()
@@ -490,6 +516,46 @@ class DenseV5Tests(unittest.TestCase):
         generated = self.model.generate(self.x, max_new_tokens=3, temperature=0, stop_ids=())
         self.assertEqual(generated.shape, (1, 15))
         torch.testing.assert_close(generated[:, :12], self.x)
+
+
+@unittest.skipUnless(importlib.util.find_spec("transformers"), "installer requirements-v5.txt")
+class Qwen35V5Tests(unittest.TestCase):
+    def setUp(self):
+        from frlm.model_v5 import ModelConfigV5Qwen35
+        torch.set_num_threads(1)
+        torch.manual_seed(5502)
+        self.cfg = ModelConfigV5Qwen35(vocab_size=300, d_model=128, n_layer=4,
+                                       n_head=2, n_kv_head=1, head_dim=64, d_ff=256,
+                                       linear_heads=2, linear_key_heads=2,
+                                       max_seq_len=32)
+        self.preset = "v5-qwen35-230m"
+        self.model = model_from_cfg(config_from_dict(self.cfg.to_dict()))
+        self.x = torch.randint(5, 300, (1, 12))
+
+    test_causality_cache_and_roundtrip = ModelV5Tests.test_causality_cache_and_roundtrip
+    test_trainer_handoff_preserves_global_schedule = ModelV5Tests.test_trainer_handoff_preserves_global_schedule
+    test_dense_masked_loss_gradients_optimizer_and_generation = DenseV5Tests.test_dense_masked_loss_gradients_optimizer_and_generation
+
+    def test_native_config_parameter_budget_and_invalid_dimensions(self):
+        from frlm.bench_speed import construire
+        from frlm.model_v5 import ModelConfigV5Qwen35
+        from transformers import Qwen3_5ForCausalLM
+        with torch.device("meta"):
+            full, cfg = construire(self.preset, 1024, 32768)
+        self.assertEqual(full.num_params(), 228_436_896)
+        self.assertEqual(cfg.to_dict()["arch"], "v5-qwen35")
+        self.assertIs(type(full.hf), Qwen3_5ForCausalLM)
+        self.assertEqual(full.hf.config.model_type, "qwen3_5_text")
+        self.assertIs(full.hf.lm_head.weight, full.hf.model.embed_tokens.weight)
+        self.assertEqual(full.hf.config.layer_types,
+                         (["linear_attention"] * 3 + ["full_attention"]) * 6)
+        self.assertFalse(any("expert" in name or "router" in name for name, _ in full.named_parameters()))
+        for changes in ({"vocab_size": 0}, {"max_seq_len": 0}, {"max_seq_len": 2049},
+                        {"n_layer": 3}, {"n_layer": 5}, {"n_kv_head": 0},
+                        {"n_kv_head": 3}, {"head_dim": 63}, {"d_model": 1000},
+                        {"d_ff": -1}, {"linear_heads": 7}, {"linear_key_heads": 0}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                ModelConfigV5Qwen35(**changes).hf_config()
 
 
 if __name__ == "__main__":

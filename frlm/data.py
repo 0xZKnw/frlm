@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -875,11 +876,12 @@ class BinCorpus:
     """Corpus tokenisé en mémoire virtuelle (np.memmap) + échantillonnage déterministe.
 
     Déterministe = le batch du step N ne dépend QUE de (seed, N). Donc reprendre un
-    entraînement au step N redonne exactement la même suite de batchs : pas de
-    doublon, pas de trou, sans avoir à sauvegarder l'état du dataloader.
+    entraînement au step N redonne exactement la même suite de batchs sans avoir
+    à sauvegarder l'état du dataloader.
     """
 
-    def __init__(self, bin_path: str | Path, seq_len: int, with_mask: bool = False):
+    def __init__(self, bin_path: str | Path, seq_len: int, with_mask: bool = False,
+                 without_replacement: bool = False):
         self.path = Path(bin_path)
         self.tokens = np.memmap(self.path, dtype=DTYPE, mode="r")
         self.mask = None
@@ -888,6 +890,7 @@ class BinCorpus:
             self.mask = np.memmap(mask_path, dtype=np.uint8, mode="r")
         self.seq_len = seq_len
         self.n_tokens = len(self.tokens)
+        self.without_replacement = without_replacement
         if self.n_tokens < seq_len + 1:
             raise ValueError(f"{bin_path} ne contient que {self.n_tokens} tokens (< seq_len+1)")
         self.doc_starts = None
@@ -911,7 +914,20 @@ class BinCorpus:
 
         rng = np.random.default_rng(seed * 1_000_003 + step)
         hi = self.n_tokens - self.seq_len - 1
-        if self.doc_starts is not None:
+        if self.without_replacement:
+            blocks = (self.n_tokens - 1) // self.seq_len
+            indices = step * batch_size + np.arange(batch_size, dtype=np.int64)
+            epochs, positions = np.divmod(indices, blocks)
+            offsets = np.empty(batch_size, dtype=np.int64)
+            for epoch in np.unique(epochs):
+                shuffle = np.random.default_rng(seed * 1_000_003 + int(epoch))
+                stride = int(shuffle.integers(1, blocks)) if blocks > 1 else 1
+                while math.gcd(stride, blocks) != 1:
+                    stride = int(shuffle.integers(1, blocks))
+                start = int(shuffle.integers(0, blocks))
+                selected = epochs == epoch
+                offsets[selected] = ((start + stride * positions[selected]) % blocks) * self.seq_len
+        elif self.doc_starts is not None:
             offsets = rng.choice(self.doc_starts, size=batch_size)
         else:
             offsets = rng.integers(0, hi, size=batch_size)

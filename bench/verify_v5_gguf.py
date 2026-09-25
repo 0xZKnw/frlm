@@ -15,7 +15,8 @@ import numpy as np
 import torch
 
 from frlm.export_v5 import normalize_config, LLAMA_REVISION
-from frlm.model_v5 import ModelConfigV5, Qwen4ExpLM
+from frlm.model_v5 import PRESETS_V5, ModelConfigV5, ModelConfigV5Qwen35, Qwen4ExpLM, Qwen35LM
+from frlm import config_from_dict
 from frlm.prepare_v5 import QWEN2_PATTERN
 from frlm import data as D
 
@@ -32,7 +33,7 @@ def read_logits(path):
     return ids, data[:, :, 4:4+vocab] * scale + offset
 
 
-def verify(llama_cpp: Path, tokenizer: Path | None = None, full_size=False):
+def verify(llama_cpp: Path, tokenizer: Path | None = None, full_size=False, qwen35=False):
     from tokenizers import Regex, Tokenizer, decoders, models, pre_tokenizers, trainers
     from transformers import PreTrainedTokenizerFast
 
@@ -51,11 +52,19 @@ def verify(llama_cpp: Path, tokenizer: Path | None = None, full_size=False):
             tok.train_from_iterator(["Les nombres 12345 et les fractions : calculons ensemble. " * 50],
                                     trainers.BpeTrainer(vocab_size=320, special_tokens=D.SPECIALS,
                                         initial_alphabet=pre_tokenizers.ByteLevel.alphabet()))
-        cfg = ModelConfigV5(vocab_size=tok.get_vocab_size()) if full_size else ModelConfigV5(
-            vocab_size=tok.get_vocab_size(), d_model=128, n_layer=4, n_head=2,
-            n_kv_head=1, head_dim=64, d_ff=64, linear_heads=2, linear_key_heads=1,
-            ngram_vocab=127, num_experts=2, experts_per_token=1, max_seq_len=256)
-        model = Qwen4ExpLM(cfg).eval()
+        if qwen35:
+            cfg = config_from_dict(PRESETS_V5["v5-qwen35-230m"] | {
+                "vocab_size": tok.get_vocab_size()}) if full_size else ModelConfigV5Qwen35(
+                vocab_size=tok.get_vocab_size(), d_model=128, n_layer=4, n_head=2,
+                n_kv_head=1, head_dim=64, d_ff=256, linear_heads=2,
+                linear_key_heads=2, max_seq_len=256)
+            model = Qwen35LM(cfg).eval()
+        else:
+            cfg = ModelConfigV5(vocab_size=tok.get_vocab_size()) if full_size else ModelConfigV5(
+                vocab_size=tok.get_vocab_size(), d_model=128, n_layer=4, n_head=2,
+                n_kv_head=1, head_dim=64, d_ff=64, linear_heads=2, linear_key_heads=1,
+                ngram_vocab=127, num_experts=2, experts_per_token=1, max_seq_len=256)
+            model = Qwen4ExpLM(cfg).eval()
         with torch.no_grad():
             for name, p in model.named_parameters():
                 if "norm" in name and "linear_attn.norm" not in name:
@@ -111,7 +120,8 @@ def verify(llama_cpp: Path, tokenizer: Path | None = None, full_size=False):
                 "tokenizer_cases": len(texts), "f32_max_logprob_error": error,
                 "f32_tolerance": 0.003, "q4_k_m_loaded": True,
                 "reference_cache": "f32", "reference_flash_attention": False,
-                "q4_bytes": quant.stat().st_size, "weights": "random+norms_and_PLE_perturbed"}
+                "q4_bytes": quant.stat().st_size,
+                "weights": "random+norms_perturbed" if qwen35 else "random+norms_and_PLE_perturbed"}
 
 
 def main():
@@ -119,9 +129,10 @@ def main():
     p.add_argument("--llama-cpp", type=Path, required=True)
     p.add_argument("--tokenizer", type=Path)
     p.add_argument("--full-size", action="store_true")
+    p.add_argument("--qwen35", action="store_true", help="vérifie la nouvelle architecture dense")
     p.add_argument("--output", type=Path)
     a = p.parse_args()
-    result = verify(a.llama_cpp, a.tokenizer, a.full_size)
+    result = verify(a.llama_cpp, a.tokenizer, a.full_size, a.qwen35)
     print(json.dumps(result, indent=2))
     if a.output:
         a.output.write_text(json.dumps(result, indent=2) + "\n")

@@ -1,4 +1,4 @@
-"""Modal v5 dense uniquement. Par défaut : préflight CPU. --go lance le mode demandé.
+"""Modal v5 Qwen3.5 dense. Par défaut : préflight CPU. --go lance le mode demandé.
 
 Les données sont préparées localement ; aucun téléchargement de corpus sur GPU.
 Les profils Modal séparent les comptes ; le second reçoit le checkpoint complet.
@@ -28,24 +28,32 @@ app = modal.App("frlm-v5", image=image)
 volume = modal.Volume.from_name("frlm-v5", create_if_missing=True)
 
 
-def command(mode: str, steps: int, seconds: float, resume: str = "") -> list[str]:
+def command(mode: str, steps: int, seconds: float, resume: str = "",
+            pilot_batch: int = 8, pilot_compile: bool = False) -> list[str]:
     if not math.isfinite(seconds) or not 0 < seconds <= 21600:
         raise ValueError("durée positive, maximum 6 heures par compte")
     if mode == "pilot":
         if seconds > 900:
             raise ValueError("pilote limité à 15 minutes")
-        return ["python", "-m", "frlm.bench_speed", "--presets", "v5-dense-350m",
-                "--vocab-size", "32768", "--seq-len", "1024", "--batch-size", "8",
-                "--grad-accum", "8", "--warmup", "3", "--steps", "10", "--no-compile",
+        if not 1 <= pilot_batch <= 64 or 64 % pilot_batch:
+            raise ValueError("microbatch pilote : diviseur de 64 entre 1 et 64")
+        args = ["python", "-m", "frlm.bench_speed", "--presets", "v5-qwen35-230m",
+                "--vocab-size", "32768", "--seq-len", "1024", "--batch-size", str(pilot_batch),
+                "--grad-accum", str(64 // pilot_batch), "--warmup", "3", "--steps", "10",
                 "--gpu-peak-tflops", "989"]
+        if not pilot_compile:
+            args.append("--no-compile")
+        return args
     if mode not in ("pretrain", "sft") or steps <= 0:
         raise ValueError("mode pretrain/sft et nombre global de steps explicite requis")
     if mode == "sft" and not resume:
         raise ValueError("le SFT exige un checkpoint prétrain explicite")
     args = ["python", "run.py", "train" if mode == "pretrain" else "sft",
-            "--preset", "v5-dense-350m", "--data-dir", "data-v5",
-            "--run", "fr-v5-dense", "--seq-len", "1024",
-            "--batch-size", "8", "--grad-accum", "8", "--max-steps", str(steps),
+            "--preset", "v5-qwen35-230m", "--data-dir", "data-v5",
+            "--run", "fr-v5-qwen35-230m", "--seq-len", "1024",
+            "--batch-size", "32" if mode == "pretrain" else "8",
+            "--grad-accum", "2" if mode == "pretrain" else "8",
+            "--max-steps", str(steps),
             "--stop-after-seconds", str(seconds), "--seed", "551337",
             "--optimizer", "muon" if mode == "pretrain" else "adamw",
             "--lr", "0.002" if mode == "pretrain" else "0.00002",
@@ -100,8 +108,9 @@ def execute(args: list[str], seconds: float):
 
 @app.local_entrypoint()
 def main(mode: str = "pilot", steps: int = 0, seconds: float = 900,
-         resume: str = "", go: bool = False, check_only: bool = False):
-    args = command(mode, steps, seconds, resume)
+         resume: str = "", go: bool = False, check_only: bool = False,
+         pilot_batch: int = 8, pilot_compile: bool = False):
+    args = command(mode, steps, seconds, resume, pilot_batch, pilot_compile)
     preflight.remote(args)
     if not go or check_only:
         print("Préflight CPU terminé. Aucun GPU lancé ; --go est requis.")

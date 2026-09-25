@@ -496,19 +496,18 @@ Puis, selon la zone touchée :
   réellement exécutées et les validations GPU/cloud non exécutées.
 
 
-## V5 Qwen4-exp dense (25 septembre 2026) et ancien MoE
+## V5 Qwen3.5 texte dense (25 septembre 2026) et architectures historiques
 
-- La v5 courante utilise `arch=v5-dense`, `ModelConfigV5Dense`, `DenseLM` et le
-  preset `v5-dense-350m` (351 046 320 paramètres) : Qwen4-exp dense, 24 couches,
-  largeur 768, FFN 3840, GQA 12Q/3KV, tête 64, vocabulaire 32768, contexte 2048,
-  embeddings partagés. Aucun expert ni routeur. Nouveau run `fr-v5-dense`.
-  `frlm/qwen4_dense.py` réutilise Transformers 5.17.0 : GDN/attention 3:1,
-  GR4, PLE, QSA et cache inchangés, un seul SwiGLU par couche. Conserver
-  `num_experts=0` dans la configuration dense et tester l'absence réelle de
-  routeurs/experts. Ce modèle est une variante locale, pas un dense officiel Qwen.
-- `arch=v5-qwen4exp`, `ModelConfigV5`, `Qwen4ExpLM` et le preset MoE historique
-  `v5-qwen4exp-350m` restent lisibles. Ne pas réécrire leurs checkpoints/rapports.
-  Une reprise MoE vers dense doit échouer au préflight et dans Trainer.
+- La v5 courante utilise `arch=v5-qwen35`, `ModelConfigV5Qwen35`, `Qwen35LM`
+  et le preset `v5-qwen35-230m` (228 436 896 paramètres) dans le run neuf
+  `fr-v5-qwen35-230m`. Transformers 5.17.0 fournit le Qwen3.5 natif : 24 couches,
+  largeur 768, FFN 2816, GQA 12Q/2KV, tête 64, 8 têtes GDN K/V, ratio
+  GDN/attention 3:1, vocabulaire 32768, contexte maximal 2048 et embeddings
+  partagés. Pas de MoE, vision ou MTP. Le preset 351M reste disponible mais
+  n'a pas de checkpoint entraîné.
+- `arch=v5-dense` (Qwen4-exp dense local) et `arch=v5-qwen4exp` (ancien MoE)
+  restent lisibles. Ne pas réécrire leurs checkpoints ou rapports et ne jamais
+  reprendre leur état d'entraînement pour Qwen3.5.
 - Le fast path QSA partagé retourne le masque visible entier uniquement si le nombre de
   clés est inférieur ou égal au budget. Conserver les mises à jour du cache
   indexeur et le repli amont au-delà du budget. Tester sorties, gradients,
@@ -520,35 +519,41 @@ Puis, selon la zone touchée :
 - `manifest.json` couvre le prétrain ; `sft_manifest.json` reste distinct pour ne
   pas invalider une reprise prétrain. Les empreintes des bins sont contrôlées avant
   utilisation. Les corpus bruts, bins et états SQLite restent hors Git.
+- Le prétrain du preset `v5-qwen35-230m` parcourt les blocs non chevauchants de
+  `train.bin` une fois par cycle, selon une permutation déterministe issue de la
+  seed et de l'epoch. Le step et la taille de batch suffisent à retrouver l'ordre
+  à la reprise. La validation et les autres presets gardent leur sampler ancien.
 - `--sft-recipe v5` utilise les conversations entières et les poids en tokens
   assistant ; ne pas confondre leur distribution avec celle des conversations.
   Le déficit de la source AST est explicite, jamais rempli par duplication.
-- `modal_v5.py` exige `--go` après le préflight CPU pour allouer un H100. L'accord
-  explicite de l'utilisateur reste nécessaire ; aucun lancement n'est autorisé
-  pendant la préparation. Ne pas relancer le 229M.
-- Image Modal dense : PyTorch/Transformers, `PYTHONPATH=/root/app`, FLA,
+- `modal_v5.py` exige `--go` après le préflight CPU pour allouer un H100.
+  Les modes pilote/prétrain/SFT ciblent Qwen3.5 ; aucun prétrain n'a démarré.
+  Le dernier pilote 228M, sans compilation, batch 32 × accumulation 2,
+  séquence 1024, a atteint 98,0k tokens/s et 72,86 Go de VRAM sur H100.
+  Le prétrain utilise cette géométrie ; le SFT reste en 8 × 8 pour que le replay
+  de 12 % occupe un microbatch sur huit. Ne plus lancer de pilote payant :
+  l'utilisateur a demandé d'arrêter les tests pour préserver ses crédits.
+  Les mesures sur tokens aléatoires ne garantissent pas le débit réel.
+- Image Modal : PyTorch/Transformers, `PYTHONPATH=/root/app`, FLA,
   causal-conv1d et TileLang 0.1.14 pour GDN (contournement du bug Triton/Hopper
-  #640, garde amont conservée). Les modes pilote/prétrain/SFT ciblent le dense.
-  Limites du job : 4 cœurs et 32 GiB maximum. Utiliser `modal run --detach` pour
-  une session nocturne ; le timer reste indépendant du schedule global.
-  Aucun débit GPU dense n'est mesuré : refaire un pilote autorisé avant de fixer
-  le nombre global de steps. Les mesures du MoE ne sont pas transférables.
+  #640, garde amont conservée). Limites du job : 4 cœurs et 32 GiB maximum.
+  Utiliser `modal run --detach` pour une session nocturne ; le timer reste
+  indépendant du schedule global.
 - Pour les deux comptes, conserver le même `--max-steps` global, les mêmes bins,
   tokenizer et réglages. Transférer le checkpoint complet avec optimiseurs/RNG.
   Utiliser `--stop-after-seconds` pour la limite de session ; pas de reprise
   weights-only dans la même phase. Le préflight et Trainer partagent ce contrat.
-- Export dense : `python -m frlm.export_v5 --checkpoint CHEMIN --tokenizer
-  data-v5/tokenizer.json --hf-dir exports/v5-dense-hf --hf-only`. Le code HF
-  de la variante accompagne les safetensors. Recharger avec `trust_remote_code=True`
-  et vérifier les logits. Le GGUF dense est explicitement hors périmètre et refusé.
-  `bench.verify_v5_gguf` et ses rapports restent réservés au MoE historique.
+- Export Qwen3.5 natif : `python -m frlm.export_v5 --checkpoint CHEMIN
+  --tokenizer data-v5/tokenizer.json --hf-dir exports/v5-qwen35-hf
+  --llama-cpp CHEMIN --output exports/v5-qwen35.gguf`. `llama.cpp` est épinglé
+  dans `frlm/export_v5.py`, avec `--no-mtp`. Le modèle aléatoire à taille réelle
+  a passé la comparaison de tokenizer et log-probabilités HF/GGUF, ainsi que
+  le chargement Q4_K_M. L'ancien Qwen4 dense reste HF uniquement.
 - Vérification : `python -m unittest discover -s tests -v`, puis `python -c
   'import atexit, verification.v5_contracts; from crosshair.main import main; from
   crosshair.auditwall import disable_auditwall; atexit.register(disable_auditwall);
   main()' check verification/v5_contracts.py --analysis_kind=asserts
-  --per_condition_timeout=15 --report_all`. La validation des dimensions denses
-  est explorée symboliquement (largeur -2..4096, têtes -2..64, dimension de tête
-  -2..256, contexte -2..4096) ; cela ne prouve pas les calculs PyTorch/CUDA.
-  La suite CPU vérifie la reprise et l'export HF dense ; la CI garde également
-  la vérification GGUF du MoE historique.
-  Aucun test GPU/Modal ne doit partir sans accord.
+  --per_condition_timeout=15 --report_all`. Les contrats de dimensions Qwen3.5
+  ont été explorés symboliquement ; cela ne prouve pas les calculs PyTorch/CUDA.
+  La suite CPU vérifie reprise, échantillonnage et export HF ; la CI vérifie le
+  GGUF Qwen3.5 et celui du MoE historique. Aucun autre pilote Modal n'est prévu.

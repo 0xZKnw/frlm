@@ -1,7 +1,7 @@
 """Recherche symbolique : quotas de tokens et couverture du budget QSA."""
 import torch
 
-from frlm.model_v5 import full_context_indexer, ModelConfigV5Dense
+from frlm.model_v5 import full_context_indexer, ModelConfigV5Dense, ModelConfigV5Qwen35
 from frlm.prepare_v5 import token_targets
 
 
@@ -16,6 +16,39 @@ def dense_dimensions(width: int, heads: int, kv_heads: int, head_dim: int, conte
     valid = (width > 0 and heads > 0 and kv_heads > 0 and head_dim > 0
              and width == heads * head_dim and heads % kv_heads == 0
              and head_dim % 4 == 0 and width % 8 == 0 and 1 <= context <= 2048)
+    try:
+        cfg.validate()
+    except ValueError:
+        assert not valid
+    else:
+        assert valid
+
+
+def qwen35_head_dimensions(width: int, heads: int, kv_heads: int, head_dim: int):
+    """Le preset texte natif accepte exactement les têtes GQA/MRoPE cohérentes."""
+    assert -1 <= width <= 1024
+    assert -1 <= heads <= 32 and -1 <= kv_heads <= 16
+    assert -1 <= head_dim <= 128
+    cfg = ModelConfigV5Qwen35(d_model=width, n_head=heads, n_kv_head=kv_heads,
+                              head_dim=head_dim)
+    valid = (width > 0 and heads > 0 and kv_heads > 0 and head_dim > 0
+             and width == heads * head_dim and heads % kv_heads == 0
+             and width % 8 == 0 and head_dim % 8 == 0)
+    try:
+        cfg.validate()
+    except ValueError:
+        assert not valid
+    else:
+        assert valid
+
+
+def qwen35_layer_dimensions(layers: int, context: int, value_heads: int, key_heads: int):
+    assert -1 <= layers <= 32 and -1 <= context <= 2049
+    assert -1 <= value_heads <= 16 and -1 <= key_heads <= 16
+    cfg = ModelConfigV5Qwen35(n_layer=layers, max_seq_len=context,
+                              linear_heads=value_heads, linear_key_heads=key_heads)
+    valid = (layers >= 4 and layers % 4 == 0 and 1 <= context <= 2048
+             and value_heads > 0 and key_heads > 0 and value_heads % key_heads == 0)
     try:
         cfg.validate()
     except ValueError:

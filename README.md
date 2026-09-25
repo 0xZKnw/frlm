@@ -29,25 +29,24 @@ stats dashboard, and a chat mode to poke the model without stopping training.
 
 ---
 
-## V5 Qwen4-exp dense : 351M
+## V5 Qwen3.5 texte dense : 228M
 
-La v5 utilise désormais une **variante dense de Qwen4-exp à 351 046 320 paramètres**,
-initialisée de zéro. Elle réutilise les blocs de Transformers 5.17.0 via
-`frlm/qwen4_dense.py` et remplace chaque MoE par un seul SwiGLU dense, sans
-routeur ni expert partagé. Gated DeltaNet/attention 3:1, GR4, PLE, QK-Norm et
-RoPE partiel sont conservés. C'est une variante locale, pas une architecture
-dense officielle publiée par Qwen.
+La v5 courante est un **Qwen3.5 texte dense natif de 228 436 896 paramètres**,
+initialisé de zéro avec Transformers 5.17.0. Il garde le ratio 3 couches Gated
+DeltaNet / 1 couche d'attention complète, GQA, SwiGLU et RMSNorm zéro-centrée.
+Il n'a ni vision, ni MoE, ni tête MTP. Le preset `v5-qwen35-230m` a 24 couches,
+une largeur de 768, un FFN de 2816, 12 têtes Q / 2 KV de dimension 64 et
+8 têtes Gated DeltaNet K/V de dimension 64. Embeddings partagés, vocabulaire
+français 32768, contexte maximal 2048. Le run neuf est `fr-v5-qwen35-230m`.
 
-Le preset `v5-dense-350m` contient 24 couches, une largeur de 768, un FFN de 3840,
-12 têtes Q / 3 KV (dimension 64), et 12 têtes valeur / 6 clés pour DeltaNet.
-Les embeddings entrée/sortie sont partagés ; vocabulaire 32768 et contexte 2048.
-
-Le nouveau run est `fr-v5-dense`. Le MoE `fr-v5-qwen4exp` arrêté le 24 septembre
-reste historique ; ses checkpoints restent lisibles, mais sont refusés pour une
-reprise dense. Les données et le tokenizer `data-v5/` sont réutilisables sans
-rebinarisation. Aucun gain de qualité ou de vitesse du dense n'est encore mesuré.
-Le [rapport initial](bench/reports/v5_preparation_20260924.md) documente les corpus
-et licences ; ses mesures de vitesse, architecture et budget concernent le MoE.
+Le preset Qwen3.5 à 351M reste disponible pour comparaison, mais n'a aucun
+checkpoint entraîné. Le MoE `fr-v5-qwen4exp` et la variante locale Qwen4 dense
+`fr-v5-dense` sont
+historiques ; leurs checkpoints restent lisibles et ne peuvent pas servir de
+reprise pour Qwen3.5. Les 4,0B tokens préparés dans `data-v5/` et le tokenizer
+restent utilisables sans rebinarisation. Le [rapport Qwen3.5](bench/reports/v5_qwen35_dense_20260925.md)
+donne la configuration, les tests GGUF et les mesures H100 ; le
+[rapport initial](bench/reports/v5_preparation_20260924.md) conserve les corpus et licences.
 
 ```bash
 python3.12 -m venv .venv-v5
@@ -63,28 +62,38 @@ Le prétrain prépare 85 % de français et 15 % de maths anglophones en tokens.
 Le SFT garde les conversations entières (1024 tokens), supervise uniquement
 l'assistant et convertit les poids cibles en probabilités de conversations.
 Les splits scellés sont exclus du choix des hyperparamètres et du checkpoint.
+Le prétrain Qwen3.5 parcourt les fenêtres de 1024 tokens une fois par cycle,
+dans un ordre déterministe mélangé. Cela évite de gaspiller le budget sur des
+fenêtres tirées plusieurs fois avant d'avoir couvert le corpus ; la reprise
+retrouve le même ordre avec la seed et le step sauvegardés.
 
 `modal_v5.py` reste en préflight CPU tant que `--go` n'est pas fourni.
-Tous ses modes utilisent maintenant le dense. L'image conserve FLA,
-causal-conv1d et TileLang pour Gated DeltaNet. Les ressources restent bornées à 4 cœurs et 32 GiB
-maximum. Avant un entraînement, mesurer un nouveau pilote H100 puis fixer le
-budget en fonction du débit réel ; les 28,9k tokens/s du MoE ne s'appliquent pas.
+Ses modes pilote/prétrain/SFT ciblent Qwen3.5. L'image conserve FLA,
+causal-conv1d et TileLang pour Gated DeltaNet. Les ressources restent bornées
+à 4 cœurs et 32 GiB de RAM maximum. Le dernier pilote du preset **228M**
+sur H100, sans compilation, à batch 32 × accumulation 2 × contexte 1024,
+a atteint **98,0k tokens/s** avec **72,86 Go de VRAM**. La commande de prétrain
+garde ces réglages ; le SFT reste à batch 8 × accumulation 8 pour consacrer un
+microbatch sur huit au replay. C'est une mesure courte sur tokens aléatoires : le débit
+réel et la marge mémoire en entraînement complet restent à confirmer. Les
+4,0B tokens préparés représentent 17,5 tokens par paramètre ; la cible
+indicative de 20 demanderait 4,57B tokens traités, sans garantie de tenir
+dans les 57,60 $ restants avec le SFT. Aucun prétrain Qwen3.5 n'a démarré ;
+les pilotes payants sont arrêtés.
 Pour continuer après déconnexion du client, utiliser `modal run --detach`.
 Après le pilote, fixer un nombre global de steps identique sur les deux comptes.
 `--stop-after-seconds` arrête proprement une session sans modifier ce schedule.
 Transférer le checkpoint `.pt` complet, les mêmes bins et manifests ; ne jamais
 utiliser `--init-weights-only` pour changer de compte.
 
-L'export dense est **Hugging Face uniquement** : poids safetensors, tokenizer,
-configuration et code de la variante. Le rechargement utilise
-`AutoModelForCausalLM.from_pretrained(dossier, trust_remote_code=True)` ; ce code
-provient du fichier local `qwen4_dense.py` inclus dans l'export. Les tests comparent
-ses logits au checkpoint. Le GGUF dense n'est pas pris en charge ; le convertisseur
-le refuse explicitement. `bench.verify_v5_gguf` reste réservé au MoE historique.
+L'export Qwen3.5 produit le format Hugging Face natif puis un GGUF avec la
+révision llama.cpp épinglée dans `frlm/export_v5.py`. Les tests comparent le
+tokenizer et les log-probabilités HF/GGUF à taille réelle, puis chargent un
+Q4_K_M. L'ancien Qwen4 dense reste limité à l'export HF avec `--hf-only`.
 
 ```bash
-# Après entraînement, export d'un checkpoint explicitement choisi.
-python -m frlm.export_v5 --checkpoint runs/fr-v5-dense/sft/ckpt_best.pt --tokenizer data-v5/tokenizer.json --hf-dir exports/v5-dense-hf --hf-only
+# Après entraînement, exporter un checkpoint explicitement choisi.
+python -m frlm.export_v5 --checkpoint runs/fr-v5-qwen35-230m/sft/ckpt_best.pt --tokenizer data-v5/tokenizer.json --hf-dir exports/v5-qwen35-230m-hf --llama-cpp /chemin/llama.cpp --output exports/v5-qwen35-230m.gguf
 ```
 
 ## Correctifs du pipeline du 24 septembre 2026 : reason45c

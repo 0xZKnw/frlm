@@ -42,6 +42,9 @@ def construire(preset: str, seq_len: int, vocab: int):
 def mesurer(preset: str, a, batch_size: int, grad_accum: int) -> dict:
     device = "cuda"
     torch.manual_seed(1337)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
 

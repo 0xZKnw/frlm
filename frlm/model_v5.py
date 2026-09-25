@@ -15,6 +15,8 @@ from frlm.model import QwenLikeLM
 
 
 PRESETS_V5 = {
+    "v5-qwen35-230m": {"arch": "v5-qwen35", "d_model": 768, "n_head": 12, "d_ff": 2816},
+    "v5-qwen35-350m": {"arch": "v5-qwen35"},
     "v5-dense-350m": {"arch": "v5-dense"},
     "v5-qwen4exp-350m": {"arch": "v5-qwen4exp"},
 }
@@ -168,6 +170,76 @@ class ModelConfigV5Dense(ModelConfigV5):
         })
 
 
+@dataclass
+class ModelConfigV5Qwen35:
+    """Backbone texte Qwen3.5 dense, sans vision ni MTP."""
+    vocab_size: int = 32768
+    d_model: int = 896
+    n_layer: int = 24
+    n_head: int = 14
+    n_kv_head: int = 2
+    head_dim: int = 64
+    d_ff: int = 4096
+    linear_heads: int = 8
+    linear_key_heads: int = 8
+    linear_head_dim: int = 64
+    max_seq_len: int = 2048
+    eos_id: int = 0
+    bos_id: int = 0
+    tie_embeddings: bool = True
+
+    @property
+    def rope_dims(self):
+        return self.head_dim // 4
+
+    def to_dict(self):
+        return {"arch": "v5-qwen35", **asdict(self)}
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(**{k: v for k, v in data.items() if k != "arch"})
+
+    def validate(self):
+        dims = (self.vocab_size, self.d_model, self.n_layer, self.n_head,
+                self.n_kv_head, self.head_dim, self.d_ff, self.linear_heads,
+                self.linear_key_heads, self.linear_head_dim)
+        if any(v <= 0 for v in dims):
+            raise ValueError("dimensions Qwen3.5 strictement positives")
+        if self.n_layer < 4 or self.n_layer % 4 or not 1 <= self.max_seq_len <= 2048:
+            raise ValueError("Qwen3.5 : couches multiples de 4, contexte <= 2048")
+        if self.d_model != self.n_head * self.head_dim or self.n_head % self.n_kv_head:
+            raise ValueError("Qwen3.5 : dimensions GQA incompatibles")
+        if self.d_model % 8 or self.linear_heads % self.linear_key_heads:
+            raise ValueError("Qwen3.5 : dimensions GDN/RoPE incompatibles")
+        if self.head_dim % 8:
+            raise ValueError("Qwen3.5 : MRoPE exige head_dim divisible par 8")
+
+    def hf_config(self):
+        from transformers import Qwen3_5TextConfig
+
+        self.validate()
+        rope_quarter = self.head_dim // 8
+        sections = [rope_quarter // 3] * 3
+        sections[0] += rope_quarter - sum(sections)
+        return Qwen3_5TextConfig(
+            vocab_size=self.vocab_size, hidden_size=self.d_model,
+            num_hidden_layers=self.n_layer, num_attention_heads=self.n_head,
+            num_key_value_heads=self.n_kv_head, head_dim=self.head_dim,
+            intermediate_size=self.d_ff, linear_num_key_heads=self.linear_key_heads,
+            linear_num_value_heads=self.linear_heads,
+            linear_key_head_dim=self.linear_head_dim,
+            linear_value_head_dim=self.linear_head_dim,
+            layer_types=["full_attention" if (i + 1) % 4 == 0 else "linear_attention"
+                         for i in range(self.n_layer)],
+            max_position_embeddings=self.max_seq_len,
+            eos_token_id=self.eos_id, bos_token_id=self.bos_id, pad_token_id=self.eos_id,
+            tie_word_embeddings=self.tie_embeddings,
+            rope_parameters={"rope_type": "default", "rope_theta": 10000000.,
+                             "partial_rotary_factor": 0.25, "mrope_interleaved": True,
+                             "mrope_section": sections},
+        )
+
+
 class TransformersLM(QwenLikeLM):
     """Interface frlm commune : cibles déjà décalées, masques SFT et cache HF."""
     has_router = False
@@ -240,6 +312,25 @@ class DenseLM(TransformersLM):
 
     def describe(self):
         return "Qwen4-exp dense · GDN 3:1 · SwiGLU · GR4 · PLE"
+
+
+class Qwen35LM(TransformersLM):
+    def __init__(self, cfg: ModelConfigV5Qwen35):
+        from transformers import Qwen3_5ForCausalLM
+
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.hf = Qwen3_5ForCausalLM(cfg.hf_config())
+        for module in self.hf.modules():
+            if type(module).__name__ == "Qwen3_5RMSNorm":
+                module.zero_centered = True
+
+    def flops_per_token(self):
+        # Approximation matricielle ; les scans GDN ne sont pas comptés.
+        return 6 * (self.num_params(non_embedding=True) + self.hf.lm_head.weight.numel())
+
+    def describe(self):
+        return "Qwen3.5 texte dense · GDN 3:1 · SwiGLU · GQA · RMSNorm"
 
 
 class Qwen4ExpLM(TransformersLM):

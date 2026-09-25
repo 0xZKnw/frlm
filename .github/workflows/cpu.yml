@@ -53,3 +53,4 @@ jobs:
           cmake -S /tmp/llama-v5 -B /tmp/llama-v5/build -DGGML_CUDA=OFF -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_USE_PREBUILT_UI=OFF
           cmake --build /tmp/llama-v5/build --target llama-tokenize llama-perplexity llama-quantize -j 2
       - run: python -m bench.verify_v5_gguf --llama-cpp /tmp/llama-v5
+      - run: python -m bench.verify_v5_gguf --llama-cpp /tmp/llama-v5 --qwen35

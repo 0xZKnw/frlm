@@ -1,8 +1,8 @@
-"""Export HF de la v5 ; GGUF réservé au MoE historique.
+"""Export HF/GGUF de la v5 Qwen3.5 dense et des anciens modèles.
 
 Les seules adaptations sont le BPE français reconnu par sa structure, le nom
 canonique des couches QSA et la table PLE non fragmentée de Transformers 5.17.
-La variante Qwen4-exp dense s'exporte avec --hf-only et son code HF local.
+La variante Qwen4-exp dense historique s'exporte avec --hf-only.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def export_hf(checkpoint: Path, tokenizer: Path, output: Path):
         raise FileExistsError(f"export déjà présent : {output}")
     ck = torch.load(checkpoint, map_location="cpu", weights_only=False, mmap=True)
     cfg = config_from_dict(ck["model_cfg"])
-    if cfg.to_dict().get("arch") not in ("v5-qwen4exp", "v5-dense"):
+    if cfg.to_dict().get("arch") not in ("v5-qwen4exp", "v5-dense", "v5-qwen35"):
         raise ValueError("checkpoint autre que v5")
     from frlm.prepare_v5 import sha256
     if ck.get("tokenizer_sha256") != sha256(tokenizer):
@@ -53,7 +53,7 @@ def export_hf(checkpoint: Path, tokenizer: Path, output: Path):
 def normalize_config(folder: Path):
     path = folder / "config.json"
     cfg = json.loads(path.read_text())
-    if cfg["model_type"] == "frlm_qwen4exp_dense":
+    if cfg["model_type"] in ("frlm_qwen4exp_dense", "qwen3_5_text"):
         return  # Export HF natif : ne pas appliquer les adaptations GGUF historiques.
     cfg["layer_types"] = ["full_attention" if t == "qwen_sparse_attention" else t
                           for t in cfg["layer_types"]]
@@ -81,30 +81,34 @@ def convert(folder: Path, output: Path, llama_cpp: Path, outtype="f32"):
     previous_path, previous_argv = sys.path[:], sys.argv[:]
     sys.path[:0] = [str(llama_cpp), str(llama_cpp / "gguf-py")]
     import gguf
-    from conversion.qwen4exp import Qwen4ExpTextModel
+    if cfg["model_type"] == "qwen3_5_text":
+        from conversion.qwen import Qwen3_5TextModel as converter
+    else:
+        from conversion.qwen4exp import Qwen4ExpTextModel as converter
 
-    # La détection amont dépend d'un hash d'IDs : impossible pour un vocabulaire neuf.
-    previous_vocab = Qwen4ExpTextModel.get_vocab_base_pre
-    Qwen4ExpTextModel.get_vocab_base_pre = lambda self, tokenizer: "qwen2"
-    original = Qwen4ExpTextModel.modify_tensors
-
-    def tensors(self, tensor, name, bid):
-        if name.endswith(".ple_embedding.ngram_embedding.weight"):
-            self._ple_row_dim = int(tensor.shape[-1])
-            return [(gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.PER_LAYER_TOKEN_EMBD] + ".weight", tensor)]
-        return original(self, tensor, name, bid)
-
-    Qwen4ExpTextModel.modify_tensors = tensors
+    # Le vocabulaire français neuf conserve exactement la pré-tokenisation qwen2.
+    previous_vocab = converter.get_vocab_base_pre
+    converter.get_vocab_base_pre = lambda self, tokenizer: "qwen2"
+    original = converter.modify_tensors
+    if cfg["model_type"] != "qwen3_5_text":
+        def tensors(self, tensor, name, bid):
+            if name.endswith(".ple_embedding.ngram_embedding.weight"):
+                self._ple_row_dim = int(tensor.shape[-1])
+                return [(gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.PER_LAYER_TOKEN_EMBD] + ".weight", tensor)]
+            return original(self, tensor, name, bid)
+        converter.modify_tensors = tensors
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
         with tempfile.TemporaryDirectory(prefix=".gguf-v5-", dir=output.parent) as tmp:
             staging = Path(tmp) / output.name
             sys.argv = ["convert_hf_to_gguf.py", str(folder), "--outfile", str(staging), "--outtype", outtype]
+            if cfg["model_type"] == "qwen3_5_text":
+                sys.argv.append("--no-mtp")
             runpy.run_path(str(llama_cpp / "convert_hf_to_gguf.py"), run_name="__main__")
             staging.rename(output)
     finally:
-        Qwen4ExpTextModel.modify_tensors = original
-        Qwen4ExpTextModel.get_vocab_base_pre = previous_vocab
+        converter.modify_tensors = original
+        converter.get_vocab_base_pre = previous_vocab
         sys.path[:], sys.argv = previous_path, previous_argv
 
 
@@ -113,7 +117,7 @@ def main():
     p.add_argument("--checkpoint", type=Path)
     p.add_argument("--tokenizer", type=Path, default=Path("data-v5/tokenizer.json"))
     p.add_argument("--hf-dir", type=Path, required=True)
-    p.add_argument("--hf-only", action="store_true", help="export HF uniquement (variante dense)")
+    p.add_argument("--hf-only", action="store_true", help="export HF uniquement")
     p.add_argument("--llama-cpp", type=Path)
     p.add_argument("--output", type=Path)
     p.add_argument("--outtype", choices=["f32", "f16", "bf16", "q8_0"], default="f16")
@@ -124,7 +128,7 @@ def main():
         export_hf(args.checkpoint, args.tokenizer, args.hf_dir)
         return
     if args.llama_cpp is None or args.output is None:
-        p.error("GGUF exige --llama-cpp et --output ; utiliser --hf-only pour le dense")
+        p.error("GGUF exige --llama-cpp et --output")
     if args.checkpoint:
         export_hf(args.checkpoint, args.tokenizer, args.hf_dir)
     convert(args.hf_dir, args.output, args.llama_cpp, args.outtype)

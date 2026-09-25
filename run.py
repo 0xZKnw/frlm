@@ -376,7 +376,10 @@ class Trainer:
             val_bin = data_dir / f"{prefix}val.bin"
             if not train_bin.exists():
                 sys.exit(f"[!] {train_bin} introuvable. Lance :  python run.py prepare")
-            self.train_data = D.BinCorpus(train_bin, cfg.seq_len, with_mask=masked)
+            self.train_data = D.BinCorpus(
+                train_bin, cfg.seq_len, with_mask=masked,
+                without_replacement=cfg.stage == "pretrain" and cfg.preset == "v5-qwen35-230m",
+            )
             self.val_data = D.BinCorpus(val_bin, cfg.seq_len, with_mask=masked)
         self.replay_train = self.replay_val = None
         if masked:
