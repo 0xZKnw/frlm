@@ -71,7 +71,9 @@ class DataV5Tests(unittest.TestCase):
                 trainer.t_start = time.time()
                 checkpoint = root / "checkpoint.pt"
                 torch.save(trainer.state_payload(), checkpoint)
-                Trainer(cfg, resume=str(checkpoint))
+                trainer.metrics_file.close()
+                resumed = Trainer(cfg, resume=str(checkpoint))
+                resumed.metrics_file.close()
                 cli = ["python", "run.py", "train", "--preset", "v4-base",
                        "--data-dir", str(root), "--run", "v4-v5", "--seq-len", "12",
                        "--batch-size", "1", "--grad-accum", "1", "--max-steps", "2",
