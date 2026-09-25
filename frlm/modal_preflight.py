@@ -248,10 +248,12 @@ def _check_command(cmd: str, root: Path = Path("/root/app")) -> None:
         if "--baselines-only" not in parts:
             _check_rl_files(parts, stage, [required[1], required[2]])
     from frlm.model_v5 import PRESETS_V5
+    data_dir = required[0].parent if required else None
     is_v5 = _arg(parts, "--preset", "") in PRESETS_V5
-    if is_v5 and stage in ("train", "sft"):
+    v5_data = bool(data_dir and (is_v5 or data_dir.name == "data-v5" or
+                                 (data_dir / "manifest.json").is_file()))
+    if v5_data and stage in ("train", "sft"):
         from frlm.prepare_v5 import audit as audit_v5, sha256
-        data_dir = required[0].parent
         audit_v5(data_dir)
         if int(_arg(parts, "--seq-len", "1024")) > 2048:
             raise ValueError("v5 : contexte maximal 2048")
@@ -273,14 +275,18 @@ def _check_command(cmd: str, root: Path = Path("/root/app")) -> None:
             add_train_args(parser)
             args = parser.parse_args(parts[parts.index(stage) + 1:])
             cfg = cfg_from_args(args, "pretrain" if stage == "train" else stage)
-            mcfg = config_from_dict(PRESETS_V5[cfg.preset])
+            if cfg.preset in PRESETS_V5:
+                mcfg = config_from_dict(PRESETS_V5[cfg.preset])
+            else:
+                from frlm.model_v3 import ModelConfigV3, PRESETS_V3
+                mcfg = ModelConfigV3(**PRESETS_V3[cfg.preset])
             mcfg.vocab_size = load_tokenizer(data_dir / "tokenizer.json").get_vocab_size()
             mcfg.max_seq_len = max(mcfg.max_seq_len, cfg.seq_len)
             validate_resume(payload, cfg, mcfg.to_dict(), sha256(data_dir / "manifest.json"),
                             sha256(data_dir / "tokenizer.json"),
                             sha256(data_dir / "sft_manifest.json") if stage == "sft" else None,
                             args.init_weights_only)
-    if stage in ("mid", "sft") and not is_v5:
+    if stage in ("mid", "sft") and not v5_data:
         data_dir = required[0].parent
         meta_path = data_dir / "meta.json"
         try:

@@ -68,7 +68,10 @@ fenêtres tirées plusieurs fois avant d'avoir couvert le corpus ; la reprise
 retrouve le même ordre avec la seed et le step sauvegardés.
 
 `modal_v5.py` reste en préflight CPU tant que `--go` n'est pas fourni.
-Ses modes pilote/prétrain/SFT ciblent Qwen3.5. L'image conserve FLA,
+Ses modes `pretrain`/`sft` ciblent Qwen3.5 ; `pilot-v4` mesure le preset v4-base
+avec le vocabulaire v5, sans lire le corpus ni entraîner un checkpoint.
+`pretrain-v4` utilise `data-v5` et le run séparé `fr-v5-v4base-252m`.
+L'image conserve FLA,
 causal-conv1d et TileLang pour Gated DeltaNet. Les ressources restent bornées
 à 4 cœurs et 32 GiB de RAM maximum. Le pilote du preset **228M** sur H100,
 sans compilation, à batch 32 × accumulation 2 × contexte 1024, a atteint
@@ -82,6 +85,20 @@ en entraînement complet restent à confirmer. Les 4,0B tokens préparés
 représentent 17,5 tokens par paramètre ; la cible indicative de 20 demanderait
 4,57B tokens traités, sans garantie de tenir dans le budget restant avec le SFT.
 Aucun pas de prétrain Qwen3.5 n'a été effectué ; tous les pilotes sont terminés.
+Le pilote v4-base compilé, à batch 32 × accumulation 2 × contexte 1024 et
+vocabulaire 32768, a mesuré **189,5k tokens/s** et **35,45 Go de VRAM** sur H100
+(3 pas de chauffe, 10 mesurés). Le preset compte environ 251,8M paramètres.
+Ces tokens étaient aléatoires : le débit soutenu sur `data-v5` reste inconnu.
+Le chemin de prétrain v4 sur `data-v5` vérifie le manifest et les empreintes,
+parcourt les blocs sans remise et exige une reprise exacte du checkpoint.
+Il n'a pas encore été essayé sur un vrai entraînement ; fixer le nombre de pas
+global avant de le lancer. Le mode `pretrain-v4` compile par défaut.
+À 189,5k tokens/s, 6 milliards demanderaient environ 91 553 pas, 8,8 h et
+37,5 $ sur H100 + 4 cœurs + 16 GiB au tarif affiché ; les 54,12 $ de crédits
+annoncés laisseraient 16,6 $. À 160k tokens/s soutenus, le même objectif
+coûterait environ 44,4 $ et laisserait 9,7 $. Ces estimations ignorent les
+surcoûts et les sauvegardes ; 6 milliards représentent 1,5 passage sur le
+corpus de 4 milliards. Le SFT v4/v5 reste à configurer séparément.
 Le préflight CPU vérifie les données ; `torch.compile` produit les noyaux CUDA
 au premier passage sur GPU, comme pour la v4.
 Pour continuer après déconnexion du client, utiliser `modal run --detach` ;

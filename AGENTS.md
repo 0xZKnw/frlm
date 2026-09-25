@@ -527,15 +527,23 @@ Puis, selon la zone touchée :
   assistant ; ne pas confondre leur distribution avec celle des conversations.
   Le déficit de la source AST est explicite, jamais rempli par duplication.
 - `modal_v5.py` exige `--go` après le préflight CPU pour allouer un H100.
-  Les modes pilote/prétrain/SFT ciblent Qwen3.5. Le pilote 228M, sans compilation,
+  Les modes `pretrain`/`sft` ciblent Qwen3.5 ; `pilot-v4` mesure v4-base avec
+  vocabulaire 32768, sans lire le corpus. `pretrain-v4` prépare un run séparé
+  `fr-v5-v4base-252m` avec compilation et paramètres d'optimisation v4.
+  Le pilote 228M, sans compilation,
   batch 32 × accumulation 2,
   séquence 1024, a atteint 98,0k tokens/s et 72,86 Go de VRAM sur H100.
   Le prétrain utilise cette géométrie ; le SFT reste en 8 × 8 pour que le replay
   de 12 % occupe un microbatch sur huit. Un essai de prétrain compilé s'est arrêté
   sans pas ni checkpoint. Le pilote compilé a dépassé la VRAM à batch 32 ; le
   repli à batch 16 a expiré sans débit mesuré. Le wrapper force donc
-  `--no-compile` pour prétrain et SFT. Ne plus lancer de pilote payant :
-  l'utilisateur souhaite préserver ses crédits.
+  `--no-compile` pour prétrain et SFT Qwen3.5. Le pilote v4-base compilé
+  (batch 32 × accumulation 2, séquence 1024) a atteint 189,5k tokens/s et
+  35,45 Go de VRAM sur H100, 3 pas de chauffe et 10 mesurés, sur tokens
+  aléatoires. Aucun entraînement v4 sur `data-v5` n'a été lancé. Le chemin
+  v4/v5 audite maintenant le manifest, échantillonne sans remise et exige le
+  checkpoint exact à la reprise. Ne pas relancer de pilote payant sans demande
+  explicite ; ne pas lancer le prétrain avant fixation du nombre global de pas.
   Le préflight CPU ne compile aucun noyau CUDA ; en v4 aussi, le modèle était
   envoyé sur GPU avant `torch.compile`, dont le travail démarre au premier step.
   Les mesures sur tokens aléatoires ne garantissent pas le débit réel.

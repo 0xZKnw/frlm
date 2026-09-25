@@ -34,6 +34,58 @@ class DataV5Tests(unittest.TestCase):
             self.assertEqual(len(set(first[10:])), 2)
             self.assertEqual(first[9:12], [int(v) for v in corpus.get_batch(3, 3, seed=19, device="cpu")[0][:, 0]])
 
+    def test_v4_preset_on_v5_data_audits_and_resumes_exactly(self):
+        import contextlib
+        import io
+        import shlex
+        import time
+        import numpy as np
+        from tokenizers import Tokenizer, models, trainers, pre_tokenizers
+        from frlm.prepare_v5 import sha256, write_json
+        from frlm.modal_preflight import _check_command
+        from run import TrainConfig, Trainer
+        import run
+
+        tok = Tokenizer(models.BPE())
+        tok.pre_tokenizer = pre_tokenizers.ByteLevel()
+        tok.train_from_iterator(["Les nombres et les fractions."], trainers.BpeTrainer(
+            vocab_size=300, special_tokens=D.SPECIALS, initial_alphabet=pre_tokenizers.ByteLevel.alphabet()))
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(tmp) / "data-v5"
+            root.mkdir()
+            tok.save(str(root / "tokenizer.json"))
+            for split in ("train", "val"):
+                np.random.default_rng(55).integers(5, tok.get_vocab_size(), 3000, dtype=np.uint16).tofile(root / f"{split}.bin")
+            artifacts = {p.name: {"bytes": p.stat().st_size, "sha256": sha256(p)}
+                         for p in root.iterdir()}
+            write_json(root / "manifest.json", {"artifacts": artifacts})
+            write_json(root / "meta.json", {"manifest_sha256": sha256(root / "manifest.json")})
+            tiny = dict(n_layer=4, n_head=4, n_kv_head=2, d_model=64, head_dim=16,
+                        d_ff=128, max_seq_len=32, window=16, n_value_embeds=1)
+            cfg = TrainConfig(run_name="v4-v5", data_dir=str(root), out_dir=str(root / "runs"),
+                              preset="v4-base", batch_size=1, grad_accum=1, seq_len=12,
+                              max_steps=2, device="cpu", compile=False, sample_every=0)
+            with patch.dict(run.PRESETS_V3, {"v4-base": tiny}):
+                trainer = Trainer(cfg)
+                self.assertTrue(trainer.train_data.without_replacement)
+                trainer.t_start = time.time()
+                checkpoint = root / "checkpoint.pt"
+                torch.save(trainer.state_payload(), checkpoint)
+                Trainer(cfg, resume=str(checkpoint))
+                cli = ["python", "run.py", "train", "--preset", "v4-base",
+                       "--data-dir", str(root), "--run", "v4-v5", "--seq-len", "12",
+                       "--batch-size", "1", "--grad-accum", "1", "--max-steps", "2",
+                       "--resume", str(checkpoint)]
+                _check_command(shlex.join(cli), root)
+                cli[cli.index("--max-steps") + 1] = "3"
+                with self.assertRaisesRegex(ValueError, "reprise v5 non exacte"):
+                    _check_command(shlex.join(cli), root)
+                with self.assertRaisesRegex(ValueError, "reprise v5 non exacte"):
+                    Trainer(TrainConfig(**(vars(cfg) | {"max_steps": 3})), resume=str(checkpoint))
+                (root / "train.bin").write_bytes(b"bad")
+                with self.assertRaisesRegex(ValueError, "artefact altéré"):
+                    _check_command(shlex.join(cli), root)
+
     @unittest.skipUnless(importlib.util.find_spec("modal"), "SDK Modal optionnel")
     def test_modal_command_budget_and_explicit_handoff(self):
         from modal_v5 import command
@@ -59,6 +111,15 @@ class DataV5Tests(unittest.TestCase):
         self.assertEqual(pilot[pilot.index("--batch-size") + 1], "16")
         self.assertEqual(pilot[pilot.index("--grad-accum") + 1], "4")
         self.assertNotIn("--no-compile", pilot)
+        v4_pilot = command("pilot-v4", 0, 900, pilot_batch=32, pilot_compile=True)
+        self.assertEqual(v4_pilot[v4_pilot.index("--presets") + 1], "v4-base")
+        self.assertEqual(v4_pilot[v4_pilot.index("--vocab-size") + 1], "32768")
+        self.assertEqual(v4_pilot[v4_pilot.index("--grad-accum") + 1], "2")
+        self.assertNotIn("--no-compile", v4_pilot)
+        v4_train = command("pretrain-v4", 91553, 18000)
+        self.assertEqual(v4_train[v4_train.index("--preset") + 1], "v4-base")
+        self.assertEqual(v4_train[v4_train.index("--run") + 1], "fr-v5-v4base-252m")
+        self.assertNotIn("--no-compile", v4_train)
         with self.assertRaises(ValueError):
             command("pilot", 0, 900, pilot_batch=3)
         self.assertEqual(first[first.index("--max-steps") + 1], second[second.index("--max-steps") + 1])

@@ -1,4 +1,4 @@
-"""Modal v5 Qwen3.5 dense. Par défaut : préflight CPU. --go lance le mode demandé.
+"""Modal v5 : Qwen3.5 dense ou prétrain v4-base. Préflight CPU par défaut.
 
 Les données sont préparées localement ; aucun téléchargement de corpus sur GPU.
 Les profils Modal séparent les comptes ; le second reçoit le checkpoint complet.
@@ -32,37 +32,45 @@ def command(mode: str, steps: int, seconds: float, resume: str = "",
             pilot_batch: int = 8, pilot_compile: bool = False) -> list[str]:
     if not math.isfinite(seconds) or not 0 < seconds <= 21600:
         raise ValueError("durée positive, maximum 6 heures par compte")
-    if mode == "pilot":
+    if mode in ("pilot", "pilot-v4"):
         if seconds > 900:
             raise ValueError("pilote limité à 15 minutes")
         if not 1 <= pilot_batch <= 64 or 64 % pilot_batch:
             raise ValueError("microbatch pilote : diviseur de 64 entre 1 et 64")
-        args = ["python", "-m", "frlm.bench_speed", "--presets", "v5-qwen35-230m",
+        preset = "v4-base" if mode == "pilot-v4" else "v5-qwen35-230m"
+        args = ["python", "-m", "frlm.bench_speed", "--presets", preset,
                 "--vocab-size", "32768", "--seq-len", "1024", "--batch-size", str(pilot_batch),
                 "--grad-accum", str(64 // pilot_batch), "--warmup", "3", "--steps", "10",
                 "--gpu-peak-tflops", "989"]
         if not pilot_compile:
             args.append("--no-compile")
         return args
-    if mode not in ("pretrain", "sft") or steps <= 0:
+    if mode not in ("pretrain", "sft", "pretrain-v4") or steps <= 0:
         raise ValueError("mode pretrain/sft et nombre global de steps explicite requis")
     if mode == "sft" and not resume:
         raise ValueError("le SFT exige un checkpoint prétrain explicite")
-    args = ["python", "run.py", "train" if mode == "pretrain" else "sft",
-            "--preset", "v5-qwen35-230m", "--data-dir", "data-v5",
-            "--run", "fr-v5-qwen35-230m", "--seq-len", "1024",
-            "--batch-size", "32" if mode == "pretrain" else "8",
-            "--grad-accum", "2" if mode == "pretrain" else "8",
+    v4 = mode == "pretrain-v4"
+    pretrain = mode != "sft"
+    args = ["python", "run.py", "train" if pretrain else "sft",
+            "--preset", "v4-base" if v4 else "v5-qwen35-230m", "--data-dir", "data-v5",
+            "--run", "fr-v5-v4base-252m" if v4 else "fr-v5-qwen35-230m", "--seq-len", "1024",
+            "--batch-size", "32" if pretrain else "8",
+            "--grad-accum", "2" if pretrain else "8",
             "--max-steps", str(steps),
             "--stop-after-seconds", str(seconds), "--seed", "551337",
-            "--optimizer", "muon" if mode == "pretrain" else "adamw",
-            "--lr", "0.002" if mode == "pretrain" else "0.00002",
-            "--adam-lr", "0.0003", "--weight-decay", "0.1" if mode == "pretrain" else "0.01",
-            "--warmup", "100" if mode == "pretrain" else "20", "--schedule", "cosine",
-            "--min-lr-frac", "0.1", "--eval-every", "200", "--eval-iters", "20",
-            "--sample-every", "200", "--save-every", "200", "--ckpt-every-min", "5",
+            "--optimizer", "muon" if pretrain else "adamw",
+            "--lr", "0.02" if v4 else "0.002" if pretrain else "0.00002",
+            "--adam-lr", "0.0015" if v4 else "0.0003",
+            "--weight-decay", "0.05" if v4 else "0.1" if pretrain else "0.01",
+            "--warmup", "1000" if v4 else "100" if pretrain else "20",
+            "--schedule", "wsd" if v4 else "cosine",
+            "--min-lr-frac", "0.02" if v4 else "0.1",
+            "--eval-every", "1000" if v4 else "200", "--eval-iters", "20",
+            "--sample-every", "1000" if v4 else "200",
+            "--save-every", "1000" if v4 else "200", "--ckpt-every-min", "5",
             "--keep-last", "2", "--gpu-peak-tflops", "989"]
-    args.append("--no-compile")
+    if not v4:
+        args.append("--no-compile")
     if resume:
         args += ["--resume", resume]
     if mode == "sft":

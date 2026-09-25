@@ -259,7 +259,7 @@ class Trainer:
         self.data_manifest_sha256 = None
         self.sft_manifest_sha256 = None
         self.tokenizer_sha256 = None
-        if cfg.preset in PRESETS_V5:
+        if cfg.preset in PRESETS_V5 or (data_dir / "manifest.json").exists() or data_dir.name == "data-v5":
             from frlm.prepare_v5 import audit, sha256
             audit(data_dir)
             self.data_manifest_sha256 = sha256(data_dir / "manifest.json")
@@ -378,7 +378,9 @@ class Trainer:
                 sys.exit(f"[!] {train_bin} introuvable. Lance :  python run.py prepare")
             self.train_data = D.BinCorpus(
                 train_bin, cfg.seq_len, with_mask=masked,
-                without_replacement=cfg.stage == "pretrain" and cfg.preset == "v5-qwen35-230m",
+                without_replacement=cfg.stage == "pretrain" and (
+                    cfg.preset == "v5-qwen35-230m" or
+                    (cfg.preset == "v4-base" and self.data_manifest_sha256 is not None)),
             )
             self.val_data = D.BinCorpus(val_bin, cfg.seq_len, with_mask=masked)
         self.replay_train = self.replay_val = None
@@ -518,7 +520,7 @@ class Trainer:
 
     def load_checkpoint(self, spec: str):
         path = self.ckpt.resolve(spec)
-        if path is None and self.cfg.preset not in PRESETS_V5:
+        if path is None and self.data_manifest_sha256 is None:
             # Un Volume peut ne contenir que latest alors que la copie locale ne
             # contient que best (ou inversement). Pour un chemin explicite, essayer
             # le checkpoint frère de la même phase avant tout autre repli.
@@ -530,7 +532,7 @@ class Trainer:
                 if alternate.exists():
                     path = alternate
                     print(f"[i] {requested.name} absent, repli sur {alternate}")
-        if path is None and spec in ("latest", "auto", "") and self.cfg.preset not in PRESETS_V5:
+        if path is None and spec in ("latest", "auto", "") and self.data_manifest_sha256 is None:
             # Un téléchargement depuis Modal garde souvent seulement ckpt_best.pt.
             # Retomber dessus vaut infiniment mieux qu'un démarrage silencieux à zéro.
             path = self.ckpt.resolve("best")
@@ -559,7 +561,7 @@ class Trainer:
             sys.exit(f"[!] Checkpoint demandé introuvable ({spec}). Refus de démarrer "
                      f"la phase '{self.cfg.stage}' à zéro.")
         ck = torch.load(path, map_location=self.device, weights_only=False)
-        if self.cfg.preset in PRESETS_V5:
+        if self.data_manifest_sha256 is not None:
             from frlm.model_v5 import validate_resume
             validate_resume(ck, self.cfg, self.mcfg.to_dict(), self.data_manifest_sha256,
                             self.tokenizer_sha256, self.sft_manifest_sha256, self.init_weights_only)
@@ -583,7 +585,7 @@ class Trainer:
                     torch.cuda.set_rng_state_all([s.cpu() for s in ck["rng"]["cuda"]])
                 np.random.set_state(ck["rng"]["numpy"])
             except Exception:
-                if self.cfg.preset in PRESETS_V5:
+                if self.data_manifest_sha256 is not None:
                     raise
             print(f"[i] Reprise depuis {path.name} — step {self.step}, {human(self.tokens_seen)} tokens vus")
         else:
