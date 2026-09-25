@@ -61,7 +61,9 @@ def command(mode: str, steps: int, seconds: float, resume: str = "",
             "--warmup", "100" if mode == "pretrain" else "20", "--schedule", "cosine",
             "--min-lr-frac", "0.1", "--eval-every", "200", "--eval-iters", "20",
             "--sample-every", "200", "--save-every", "200", "--ckpt-every-min", "5",
-            "--keep-last", "2", "--no-compile", "--gpu-peak-tflops", "989"]
+            "--keep-last", "2", "--gpu-peak-tflops", "989"]
+    if mode == "sft":
+        args.append("--no-compile")
     if resume:
         args += ["--resume", resume]
     if mode == "sft":

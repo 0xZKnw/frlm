@@ -531,7 +531,9 @@ Puis, selon la zone touchée :
   Le dernier pilote 228M, sans compilation, batch 32 × accumulation 2,
   séquence 1024, a atteint 98,0k tokens/s et 72,86 Go de VRAM sur H100.
   Le prétrain utilise cette géométrie ; le SFT reste en 8 × 8 pour que le replay
-  de 12 % occupe un microbatch sur huit. Ne plus lancer de pilote payant :
+  de 12 % occupe un microbatch sur huit. Le prétrain active `torch.compile` sur
+  demande de l'utilisateur ; aucun débit compilé n'est mesuré. Ne plus lancer
+  de pilote payant :
   l'utilisateur a demandé d'arrêter les tests pour préserver ses crédits.
   Les mesures sur tokens aléatoires ne garantissent pas le débit réel.
 - Image Modal : PyTorch/Transformers, `PYTHONPATH=/root/app`, FLA,
